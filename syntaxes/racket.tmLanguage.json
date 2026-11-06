@@ -1,19 +1,125 @@
 {
   "scopeName": "source.racket",
   "patterns": [
-    { "include": "#block-comment" },
-    { "name": "comment.block.expression.marker.racket", "match": "#;" },
-    { "name": "comment.line.semicolon.racket", "begin": ";", "end": "$" },
-    { "name": "meta.language.racket", "match": "^#lang\\s+\\S+" },
-    { "name": "string.unquoted.here.racket", "begin": "#<<([^\\r\\n]+)$", "end": "^\\1$" },
-    { "name": "string.quoted.double.racket", "begin": "(?:#(?:px|rx)?#?)?\"", "end": "\"", "patterns": [{ "name": "constant.character.escape.racket", "match": "\\\\." }] },
-    { "name": "constant.character.racket", "match": "#\\\\(?:[a-zA-Z][a-zA-Z0-9]*|.)" },
-    { "name": "variable.other.racket", "begin": "\\|", "end": "\\|", "patterns": [{ "match": "\\\\." }] },
-    { "name": "constant.language.racket", "match": "(?<![^\\s()\\[\\]{}])#(?:true|false|t|f)(?=$|[\\s()\\[\\]{}])" },
-    { "name": "constant.numeric.racket", "match": "(?<![^\\s()\\[\\]{}])[+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:/[0-9]+|[eE][+-]?[0-9]+)?(?=$|[\\s()\\[\\]{}])" },
-    { "name": "constant.other.keyword.racket", "match": "#:(?:\\\\.|[^\\s()\\[\\]{}\"'`,;|\\\\])+" },
-    { "name": "punctuation.section.racket", "match": "[()\\[\\]{}]" },
-    { "match": "(?:\\\\.|[^\\s()\\[\\]{}\"'`,;|\\\\])+" }
+    {
+      "include": "#block-comment"
+    },
+    {
+      "name": "comment.block.expression.marker.racket",
+      "match": "#;"
+    },
+    {
+      "name": "comment.line.semicolon.racket",
+      "begin": ";",
+      "end": "$"
+    },
+    {
+      "name": "meta.language.racket",
+      "match": "^#lang\\s+\\S+"
+    },
+    {
+      "name": "string.unquoted.here.racket",
+      "begin": "#<<([^\\r\\n]+)$",
+      "end": "^\\1$"
+    },
+    {
+      "name": "string.quoted.double.racket",
+      "begin": "(?:#(?:px|rx)?#?)?\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.racket",
+          "match": "\\\\."
+        }
+      ]
+    },
+    {
+      "name": "constant.character.racket",
+      "match": "#\\\\(?:[a-zA-Z][a-zA-Z0-9]*|.)"
+    },
+    {
+      "name": "variable.other.racket",
+      "begin": "\\|",
+      "end": "\\|",
+      "patterns": [
+        {
+          "match": "\\\\."
+        }
+      ]
+    },
+    {
+      "name": "constant.language.racket",
+      "match": "(?<![^\\s()\\[\\]{}\"'\\x60,;])(?i:#(?:true|false|t|f))(?=$|[\\s()\\[\\]{}\"'\\x60,;])"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "name": "constant.other.keyword.racket",
+      "match": "#:(?:\\\\.|[^\\s()\\[\\]{}\"'`,;|\\\\])+"
+    },
+    {
+      "name": "keyword.control.racket",
+      "match": "(?<![^\\s()\\[\\]{}\"'\\x60,;])(?:define(?:-values|-syntax(?:es|-rule)?)?|lambda|λ|case-lambda|let(?:\\*|rec)?(?:-values|-syntaxes)?|letrec-syntaxes\\+values|if|cond|case|else|=>|and|or|when|unless|begin(?:0|-for-syntax)?|set!|quote|quasiquote|unquote(?:-splicing)?|syntax|quasisyntax|unsyntax(?:-splicing)?|quote-syntax|require|provide|module[+*]?|struct|define-struct|match(?:-let\\*?|-define|-lambda)?|for(?:\\*|/list|/vector|/hash|/fold|/sum|/and|/or)?|with-handlers|parameterize)(?=$|[\\s()\\[\\]{}\"'\\x60,;])"
+    },
+    {
+      "name": "support.type.contract.racket",
+      "match": "(?<![^\\s()\\[\\]{}\"'\\x60,;])(?:->\\*?|->i|case->|define/contract|contract-out)(?=$|[\\s()\\[\\]{}\"'\\x60,;])"
+    },
+    {
+      "name": "punctuation.section.racket",
+      "match": "[()\\[\\]{}]"
+    },
+    {
+      "match": "(?:\\\\.|[^\\s()\\[\\]{}\"'`,;|\\\\])+"
+    }
   ],
-  "repository": { "block-comment": { "name": "comment.block.racket", "begin": "#\\|", "end": "\\|#", "patterns": [{ "include": "#block-comment" }] } }
+  "repository": {
+    "block-comment": {
+      "name": "comment.block.racket",
+      "begin": "#\\|",
+      "end": "\\|#",
+      "patterns": [
+        {
+          "include": "#block-comment"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.racket",
+          "match": "(?<![^\\s()\\[\\]{}\"'\\x60,;])(?i:(?:#b(?:#[ei])?|#[ei]#b)(?:(?:[+-]?(?:[01]+#*/[01]+#*|(?:[01]+\\.[01]*#*|\\.[01]+#*|[01]+#+\\.#*|[01]+#*))(?:[esfdl][+-]?[01]+)?|[+-](?:inf|nan)\\.[0f])(?:@(?:[+-]?(?:[01]+#*/[01]+#*|(?:[01]+\\.[01]*#*|\\.[01]+#*|[01]+#+\\.#*|[01]+#*))(?:[esfdl][+-]?[01]+)?|[+-](?:inf|nan)\\.[0f])|[+-](?:(?:[01]+#*/[01]+#*|(?:[01]+\\.[01]*#*|\\.[01]+#*|[01]+#+\\.#*|[01]+#*))(?:[esfdl][+-]?[01]+)?|(?:inf|nan)\\.[0f])?i)?|[+-](?:(?:[01]+#*/[01]+#*|(?:[01]+\\.[01]*#*|\\.[01]+#*|[01]+#+\\.#*|[01]+#*))(?:[esfdl][+-]?[01]+)?|(?:inf|nan)\\.[0f])?i))(?=$|[\\s()\\[\\]{}\"'\\x60,;])"
+        },
+        {
+          "name": "constant.numeric.racket",
+          "match": "(?<![^\\s()\\[\\]{}\"'\\x60,;])(?i:(?:#b)(?:[+-]?(?:[01]+#*/[01]+#*|(?:[01]+\\.[01]*#*|\\.[01]+#*|[01]+#+\\.#*|[01]+#*))t[+-]?[01]+|[+-](?:inf|nan)\\.t))(?=$|[\\s()\\[\\]{}\"'\\x60,;])"
+        },
+        {
+          "name": "constant.numeric.racket",
+          "match": "(?<![^\\s()\\[\\]{}\"'\\x60,;])(?i:(?:#o(?:#[ei])?|#[ei]#o)(?:(?:[+-]?(?:[0-7]+#*/[0-7]+#*|(?:[0-7]+\\.[0-7]*#*|\\.[0-7]+#*|[0-7]+#+\\.#*|[0-7]+#*))(?:[esfdl][+-]?[0-7]+)?|[+-](?:inf|nan)\\.[0f])(?:@(?:[+-]?(?:[0-7]+#*/[0-7]+#*|(?:[0-7]+\\.[0-7]*#*|\\.[0-7]+#*|[0-7]+#+\\.#*|[0-7]+#*))(?:[esfdl][+-]?[0-7]+)?|[+-](?:inf|nan)\\.[0f])|[+-](?:(?:[0-7]+#*/[0-7]+#*|(?:[0-7]+\\.[0-7]*#*|\\.[0-7]+#*|[0-7]+#+\\.#*|[0-7]+#*))(?:[esfdl][+-]?[0-7]+)?|(?:inf|nan)\\.[0f])?i)?|[+-](?:(?:[0-7]+#*/[0-7]+#*|(?:[0-7]+\\.[0-7]*#*|\\.[0-7]+#*|[0-7]+#+\\.#*|[0-7]+#*))(?:[esfdl][+-]?[0-7]+)?|(?:inf|nan)\\.[0f])?i))(?=$|[\\s()\\[\\]{}\"'\\x60,;])"
+        },
+        {
+          "name": "constant.numeric.racket",
+          "match": "(?<![^\\s()\\[\\]{}\"'\\x60,;])(?i:(?:#o)(?:[+-]?(?:[0-7]+#*/[0-7]+#*|(?:[0-7]+\\.[0-7]*#*|\\.[0-7]+#*|[0-7]+#+\\.#*|[0-7]+#*))t[+-]?[0-7]+|[+-](?:inf|nan)\\.t))(?=$|[\\s()\\[\\]{}\"'\\x60,;])"
+        },
+        {
+          "name": "constant.numeric.racket",
+          "match": "(?<![^\\s()\\[\\]{}\"'\\x60,;])(?i:(?:#d(?:#[ei])?|#[ei](?:#d)?)?(?:(?:[+-]?(?:[0-9]+#*/[0-9]+#*|(?:[0-9]+\\.[0-9]*#*|\\.[0-9]+#*|[0-9]+#+\\.#*|[0-9]+#*))(?:[esfdl][+-]?[0-9]+)?|[+-](?:inf|nan)\\.[0f])(?:@(?:[+-]?(?:[0-9]+#*/[0-9]+#*|(?:[0-9]+\\.[0-9]*#*|\\.[0-9]+#*|[0-9]+#+\\.#*|[0-9]+#*))(?:[esfdl][+-]?[0-9]+)?|[+-](?:inf|nan)\\.[0f])|[+-](?:(?:[0-9]+#*/[0-9]+#*|(?:[0-9]+\\.[0-9]*#*|\\.[0-9]+#*|[0-9]+#+\\.#*|[0-9]+#*))(?:[esfdl][+-]?[0-9]+)?|(?:inf|nan)\\.[0f])?i)?|[+-](?:(?:[0-9]+#*/[0-9]+#*|(?:[0-9]+\\.[0-9]*#*|\\.[0-9]+#*|[0-9]+#+\\.#*|[0-9]+#*))(?:[esfdl][+-]?[0-9]+)?|(?:inf|nan)\\.[0f])?i))(?=$|[\\s()\\[\\]{}\"'\\x60,;])"
+        },
+        {
+          "name": "constant.numeric.racket",
+          "match": "(?<![^\\s()\\[\\]{}\"'\\x60,;])(?i:(?:#d)?(?:[+-]?(?:[0-9]+#*/[0-9]+#*|(?:[0-9]+\\.[0-9]*#*|\\.[0-9]+#*|[0-9]+#+\\.#*|[0-9]+#*))t[+-]?[0-9]+|[+-](?:inf|nan)\\.t))(?=$|[\\s()\\[\\]{}\"'\\x60,;])"
+        },
+        {
+          "name": "constant.numeric.racket",
+          "match": "(?<![^\\s()\\[\\]{}\"'\\x60,;])(?i:(?:#x(?:#[ei])?|#[ei]#x)(?:(?:[+-]?(?:[0-9a-f]+#*/[0-9a-f]+#*|(?:[0-9a-f]+\\.[0-9a-f]*#*|\\.[0-9a-f]+#*|[0-9a-f]+#+\\.#*|[0-9a-f]+#*))(?:[sl][+-]?[0-9a-f]+)?|[+-](?:inf|nan)\\.[0f])(?:@(?:[+-]?(?:[0-9a-f]+#*/[0-9a-f]+#*|(?:[0-9a-f]+\\.[0-9a-f]*#*|\\.[0-9a-f]+#*|[0-9a-f]+#+\\.#*|[0-9a-f]+#*))(?:[sl][+-]?[0-9a-f]+)?|[+-](?:inf|nan)\\.[0f])|[+-](?:(?:[0-9a-f]+#*/[0-9a-f]+#*|(?:[0-9a-f]+\\.[0-9a-f]*#*|\\.[0-9a-f]+#*|[0-9a-f]+#+\\.#*|[0-9a-f]+#*))(?:[sl][+-]?[0-9a-f]+)?|(?:inf|nan)\\.[0f])?i)?|[+-](?:(?:[0-9a-f]+#*/[0-9a-f]+#*|(?:[0-9a-f]+\\.[0-9a-f]*#*|\\.[0-9a-f]+#*|[0-9a-f]+#+\\.#*|[0-9a-f]+#*))(?:[sl][+-]?[0-9a-f]+)?|(?:inf|nan)\\.[0f])?i))(?=$|[\\s()\\[\\]{}\"'\\x60,;])"
+        },
+        {
+          "name": "constant.numeric.racket",
+          "match": "(?<![^\\s()\\[\\]{}\"'\\x60,;])(?i:(?:#x)(?:[+-]?(?:[0-9a-f]+#*/[0-9a-f]+#*|(?:[0-9a-f]+\\.[0-9a-f]*#*|\\.[0-9a-f]+#*|[0-9a-f]+#+\\.#*|[0-9a-f]+#*))t[+-]?[0-9a-f]+|[+-](?:inf|nan)\\.t))(?=$|[\\s()\\[\\]{}\"'\\x60,;])"
+        }
+      ]
+    }
+  }
 }

@@ -9,40 +9,62 @@ import { connected } from './bindings';
 export function completionContext(lexical: LexicalSession, start: number): { modulePath: boolean; literal: boolean; inRequire: boolean } | undefined {
   const headerEnd = lexical.data.structure.headerEnd;
   if (headerEnd === false || start < headerEnd) return;
-  interface Frame { head?: string; count: number; slot: number; close: string; literal: boolean }
+  type Quotation = 'literal' | { kind: 'quasiquote' | 'quasisyntax'; depth: number } | undefined;
+  interface Frame { head?: string; count: number; slot: number; close: string; quotation: Quotation }
+  const quoteForms = new Map([
+    ["'", 'quote'], ['`', 'quasiquote'], ["#'", 'syntax'], ['#`', 'quasisyntax'], ['#&', 'quote'],
+    [',', 'unquote'], [',@', 'unquote-splicing'], ['#,', 'unsyntax'], ['#,@', 'unsyntax-splicing'],
+  ]);
+  const quoted = (quotation: Quotation, form: string): Quotation => {
+    if (quotation === 'literal') return quotation;
+    if (quotation) {
+      if (form === quotation.kind) return { ...quotation, depth: quotation.depth + 1 };
+      const escape = quotation.kind === 'quasiquote' ? 'unquote' : 'unsyntax';
+      if (form === escape || form === `${escape}-splicing`) {
+        return quotation.depth === 1 ? undefined : { ...quotation, depth: quotation.depth - 1 };
+      }
+      return quotation;
+    }
+    if (form === 'quasiquote' || form === 'quasisyntax') return { kind: form, depth: 1 };
+    if (['quote', 'syntax', 'quote-syntax', 'unquote', 'unquote-splicing', 'unsyntax', 'unsyntax-splicing'].includes(form)) return 'literal';
+    return undefined;
+  };
   const frames: Frame[] = [];
-  let prefix = false;
+  let prefixes: string[] = [];
   for (const t of lexical.data.tokens) {
     if (t.start >= start) break;
     if (t.end <= headerEnd || t.attributes['comment?'] || ['white-space', 'comment', 'sexp-comment'].includes(t.attributes.type)) continue;
     const text = lexical.snapshot.slice(t.start, t.end);
     const parent = frames.at(-1);
-    if (["'", '`', "#'", '#`', '#&', ',', ',@', '#,', '#,@'].includes(text)) {
-      prefix = true;
+    const prefix = quoteForms.get(text);
+    if (prefix) {
+      prefixes.push(prefix);
       continue;
     }
     if (t.paren && ['(', '[', '{'].includes(t.paren)) {
       const slot = parent?.count ?? 0;
       if (parent) parent.count++;
+      let quotation = prefixes.reduce<Quotation>(quoted, parent?.quotation);
+      if (text !== t.paren) quotation = quoted(quotation, 'quote');
       frames.push({ count: 0, slot, close: t.paren === '(' ? ')' : t.paren === '[' ? ']' : '}',
-        literal: !!parent?.literal || prefix || text !== t.paren });
-      prefix = false;
+        quotation });
+      prefixes = [];
     } else if (t.paren && [')', ']', '}'].includes(t.paren)) {
-      if (!parent || parent.close !== text || prefix) return;
+      if (!parent || parent.close !== text || prefixes.length) return;
       frames.pop();
     } else {
       if (t.attributes.type === 'error') return;
       if (parent) {
-        if (!parent.count && !prefix && t.attributes.type === 'symbol') {
+        if (!parent.count && !prefixes.length && t.attributes.type === 'symbol') {
           parent.head = text;
-          if (['quote', 'quasiquote', 'syntax', 'quasisyntax', 'quote-syntax'].includes(text)) parent.literal = true;
+          parent.quotation = quoted(parent.quotation, text);
         }
         parent.count++;
       }
-      prefix = false;
+      prefixes = [];
     }
   }
-  const literal = prefix || !!frames.at(-1)?.literal;
+  const literal = prefixes.reduce<Quotation>(quoted, frames.at(-1)?.quotation) !== undefined;
   const bodySlot = (index: number, slot: number): boolean => {
     if (index < 0) return true;
     const frame = frames[index];
@@ -180,6 +202,15 @@ function sourceDefinitions(lexical: LexicalSession, annotations: Annotation[], s
   return result;
 }
 
+export function symbolKind(kind: Annotation['symbolKind']): vscode.SymbolKind {
+  switch (kind) {
+    case 'module': return vscode.SymbolKind.Module;
+    case 'macro': return vscode.SymbolKind.Operator;
+    case 'function': return vscode.SymbolKind.Function;
+    default: return vscode.SymbolKind.Variable;
+  }
+}
+
 export function outlineSymbols(lexical: LexicalSession, annotations: Annotation[], source: string, complete: boolean): vscode.DocumentSymbol[] {
   const snapshot = lexical.snapshot;
   if (!complete) {
@@ -196,23 +227,21 @@ export function outlineSymbols(lexical: LexicalSession, annotations: Annotation[
   const entries = definitions.map(d => ({ start: d.form.start, end: d.form.end,
     id: d.id.start, symbol: new vscode.DocumentSymbol(d.name, '', d.kind,
       snapshot.range(d.form.start, d.form.end), snapshot.range(d.id.start, d.id.end)) }));
-  for (const { name, at, span, symbolKind } of [
+  for (const { name, at, span, symbolKind: kind } of [
     ...annotations.filter(a => a.kind === 'outline'), ...annotations.filter(a => a.kind === 'definition'),
   ]) {
     if (!name || at?.source !== source || !snapshot.contains(at)) continue;
     const existing = entries.find(entry => entry.id === at.start);
     if (existing) {
       // An unavailable source signature must not erase a confirmed function kind.
-      if (symbolKind === 'function' && existing.symbol.kind === vscode.SymbolKind.Variable) {
+      if (kind === 'function' && existing.symbol.kind === vscode.SymbolKind.Variable) {
         existing.symbol.kind = vscode.SymbolKind.Function;
       }
       continue;
     }
     const range = span?.source === source && snapshot.contains(span) ? span : at;
-    const kind = symbolKind === 'module' ? vscode.SymbolKind.Module : symbolKind === 'macro' ? vscode.SymbolKind.Operator
-      : symbolKind === 'function' ? vscode.SymbolKind.Function : vscode.SymbolKind.Variable;
     entries.push({ start: range.start, end: range.end, id: at.start,
-      symbol: new vscode.DocumentSymbol(name, '', kind, snapshot.range(range.start, range.end), snapshot.range(at.start, at.end)) });
+      symbol: new vscode.DocumentSymbol(name, '', symbolKind(kind), snapshot.range(range.start, range.end), snapshot.range(at.start, at.end)) });
   }
   entries.sort((a, b) => a.start - b.start || b.end - a.end || a.id - b.id);
   const roots: vscode.DocumentSymbol[] = [];

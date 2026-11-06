@@ -157,6 +157,24 @@
          [(box? value) (quoted (unbox value) depth locals delayed owner)]
          [(hash? value) (refuse #f "Quasiquoted hash tables require manual editing")]
          [(prefab-struct-key value) (refuse #f "Quasiquoted prefab structures require manual editing")]))
+     (define (walk-body expressions locals delayed owner)
+       (define (splice-begin form)
+         (if (eq? (head form) 'begin) (append-map splice-begin (cdr (pieces form))) (list form)))
+       (define forms (append-map splice-begin expressions))
+       (define definitions (filter-map parse-definition forms))
+       (define ids (map definition-id definitions))
+       (unless (= (length ids) (length (remove-duplicates (map syntax-e ids))))
+         (refuse (car ids) "Duplicate internal definitions require manual editing"))
+       ;; Internal definitions share a recursive scope, including forward
+       ;; references and names that shadow a repeated top-level definition.
+       (define scope (bind ids locals))
+       (for ([form (in-list forms)])
+         (define d (findf (lambda (d) (eq? form (definition-form d))) definitions))
+         (cond
+           [(not d) (walk form scope delayed owner #f)]
+           [(definition-body d)
+            (walk-body (definition-body d) (bind (parameters (definition-parameters d)) scope) #t #f)]
+           [else (walk (definition-rhs d) scope delayed owner #f)])))
      (define (walk stx locals delayed owner operator?)
        (cond
          [(identifier? stx) (reference stx locals delayed owner operator?)]
@@ -164,8 +182,8 @@
           (define xs (pieces stx))
           (define tag (head stx))
           (define args (cdr xs))
-          (define (walk-body expressions [scope locals])
-            (for ([expression (in-list expressions)]) (walk expression scope delayed owner #f)))
+          (define (walk-expressions expressions)
+            (for ([expression (in-list expressions)]) (walk expression locals delayed owner #f)))
           (case tag
             [(quote) (unless (= (length args) 1) (refuse stx "Malformed quote"))]
             [(quasiquote)
@@ -180,7 +198,7 @@
              ;; The top-level function body is handled separately. A nested
              ;; closure can outlive its version, so it gets no self-recursion
              ;; exception for references to earlier definitions.
-             (for ([e (in-list (cdr args))]) (walk e scope #t #f #f))]
+             (walk-body (cdr args) scope #t #f)]
             [(let let* letrec)
              (unless (>= (length args) 2) (refuse stx "Incomplete let"))
              (when (identifier? (car args)) (refuse stx "Named let requires manual editing"))
@@ -191,26 +209,33 @@
              (for ([b (in-list bindings)])
                (walk (cadr b) scope delayed owner #f)
                (when (eq? tag 'let*) (set! scope (bind (list (car b)) scope))))
-             (walk-body (cdr args) (bind (map car bindings) locals))]
-            [(if begin begin0 and or when unless) (walk-body args)]
+             (walk-body (cdr args) (bind (map car bindings) locals) delayed owner)]
+            [(if begin begin0 and or) (walk-expressions args)]
+            [(when unless)
+             (unless (pair? args) (refuse stx "Missing condition"))
+             (walk (car args) locals delayed owner #f)
+             (walk-body (cdr args) locals delayed owner)]
+            [(define) (refuse stx "Definition outside a body")]
             [(cond)
              (for ([clause (in-list args)])
                (define cs (pieces clause))
                (when (null? cs) (refuse clause "Empty cond clause"))
                (unless (eq? (syntax-e (car cs)) 'else) (walk (car cs) locals delayed owner #f))
-               (walk-body (if (and (>= (length cs) 2) (eq? (syntax-e (cadr cs)) '=>)) (cddr cs) (cdr cs))))]
+               (if (and (>= (length cs) 2) (eq? (syntax-e (cadr cs)) '=>))
+                   (walk-expressions (cddr cs))
+                   (walk-body (cdr cs) locals delayed owner)))]
             [(set!)
              (unless (and (= (length args) 2) (identifier? (car args))
                           (set-member? locals (syntax-e (car args))))
                (refuse stx "Top-level mutation requires manual editing"))
-             (walk-body (cdr args))]
+             (walk-expressions (cdr args))]
             [else
              (unless (or (and tag (or (set-member? locals tag) (set-member? top-names tag)
                                      (builtin-procedure? tag)))
                          (and (not tag) (pair? (syntax-e (car xs)))))
                (refuse stx (format "Unsupported syntax: ~a" (or tag "application"))))
              (walk (car xs) locals delayed owner #t)
-             (walk-body args)])]
+             (walk-expressions args)])]
          [else (void)]))
      (for ([form (in-list source)])
        (define d (findf (lambda (d) (eq? form (definition-form d))) definitions))
@@ -221,8 +246,7 @@
           (hash-set! active name d)
           (edit (definition-id d) d)
           (if (definition-body d)
-              (let ([locals (bind (parameters (definition-parameters d)) (seteq))])
-                (for ([e (in-list (definition-body d))]) (walk e locals #t d #f)))
+              (walk-body (definition-body d) (bind (parameters (definition-parameters d)) (seteq)) #t d)
               (walk (definition-rhs d) (seteq) #f d #f))]
          [else (walk form (seteq) #f #f #f)]))
      (hasheq 'edits (sort (hash-values edits) < #:key (lambda (e) (hash-ref e 'start)))

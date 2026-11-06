@@ -243,7 +243,9 @@
 (define (format-lines doc start end)
   (define first-line (send doc position-paragraph start))
   (define end-line (send doc position-paragraph end))
-  (define ends-at-line-start? (and (> end start) (= end (send doc paragraph-start-position end-line))))
+  (define ends-at-line-start?
+    (and (> end start) (< end (send doc last-position))
+         (= end (send doc paragraph-start-position end-line))))
   (define last-line (if ends-at-line-start? (send doc position-paragraph (sub1 end)) end-line))
   (define range-indentation (send doc get-info 'drracket:range-indentation #f))
   (define range-edits (and range-indentation (range-indentation doc start end)))

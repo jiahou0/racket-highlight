@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { Annotation, SourceRange } from './protocol';
 import { SemanticSession, Workspace, requireSemanticAnalysis } from './workspace';
 import { atPosition, rangeKey, assertNotCancelled, sameRange } from './documents';
-import { outlineSymbols } from './source';
+import { outlineSymbols, symbolKind } from './source';
 import { bindingAt, bindingKeys, matchingRanges } from './bindings';
 
 async function resolveJump(workspace: Workspace, jump: Annotation, token?: vscode.CancellationToken): Promise<SourceRange[]> {
@@ -161,15 +161,27 @@ export function registerNavigation(workspace: Workspace): vscode.Disposable[] {
         for (const session of workspace.cachedFiles()) {
           assertNotCancelled(token);
           const source = workspace.sourcePath(session.snapshot.uri);
+          const symbols = new Map<string, { name: string; at: SourceRange; submodules: string[]; kinds: Set<Annotation['symbolKind']> }>();
           for (const a of session.analysis.annotations) {
-            if (a.kind !== 'definition' || !a.at || a.at.source !== source || !session.snapshot.contains(a.at)
+            if (!['definition', 'outline'].includes(a.kind) || !a.at || a.at.source !== source || !session.snapshot.contains(a.at)
               || !a.name?.toLocaleLowerCase().includes(search)) continue;
-            const container = (a.submodules || []).join('/');
-            const key = JSON.stringify([rangeKey(a.at), a.name, container]);
+            const key = JSON.stringify([rangeKey(a.at), a.name, a.phaseSpace]);
+            let symbol = symbols.get(key);
+            if (!symbol) {
+              symbol = { name: a.name, at: a.at, submodules: a.submodules || [], kinds: new Set() };
+              symbols.set(key, symbol);
+            }
+            if (a.kind === 'definition') symbol.submodules = a.submodules || [];
+            if (a.symbolKind) symbol.kinds.add(a.symbolKind);
+          }
+          for (const { name, at, submodules, kinds } of symbols.values()) {
+            const container = submodules.join('/');
+            const key = JSON.stringify([rangeKey(at), name, container]);
             if (seen.has(key)) continue;
             seen.add(key);
-            const location = new vscode.Location(session.snapshot.uri, session.snapshot.range(a.at.start, a.at.end));
-            results.push(new vscode.SymbolInformation(a.name, vscode.SymbolKind.Variable, container, location));
+            const location = new vscode.Location(session.snapshot.uri, session.snapshot.range(at.start, at.end));
+            const kind = kinds.size === 1 ? [...kinds][0] : undefined;
+            results.push(new vscode.SymbolInformation(name, symbolKind(kind), container, location));
           }
         }
         return results;

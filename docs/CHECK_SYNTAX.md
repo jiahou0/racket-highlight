@@ -40,13 +40,13 @@
 | `sourceForm` | 标准源码形式的真实绑定，供定义和参数模型使用 |
 | `outline` | 核心定义的源码范围和类别 |
 | `application` | 展开后的真实调用及操作符位置 |
-| `callBinding` | 通过 `free-identifier=?` 将调用标识符关联到定义 |
+| `callBinding` | 通过按 phase 建立的 `free-id-table` 将调用标识符关联到本地定义，比较规则为 `free-identifier=?` |
 
 reader 提供完整表达式范围、嵌套和原始参数表。可选及关键字调用通过 `racket/keyword-transform` 恢复原操作符；准引用的求值边界由 expander 决定，`quote-syntax` 不按普通数据处理。
 
 标准源码形式先按 reader 的准确范围和名称匹配，再通过真实绑定确认。展开可能为源码来源附加宏作用域，因此不能仅因 `syntax-original?` 为假就丢弃该来源。
 
-函数识别共用 `lambda-expression?`，依据展开后的 `#%plain-lambda` 和 `case-lambda`。`let-values` 与 `letrec-values` 通过 `walk-value-binders` 共同保留绑定子句的 `origin`、记录函数类别并遍历绑定标识符，避免内部定义的来源处理分叉。参数类别则将源码形参范围与展开后的真实绑定匹配，不仅依赖核心 lambda 中的位置。
+函数识别共用 `lambda-expression?`，依据展开后的 `#%plain-lambda` 和 `case-lambda`；`value-binding-kind` 同时提供函数着色与补全类别。`let-values` 与 `letrec-values` 通过 `walk-value-binders` 共同保留绑定子句的 `origin`、记录函数类别并遍历绑定标识符，避免内部定义的来源处理分叉。参数类别则将源码形参范围与展开后的真实绑定匹配，不仅依赖核心 lambda 中的位置。导入候选只保留作用域，不伪造位于 require 子句的本地定义位置。
 
 其他功能也各有来源：词法编辑使用 `syntax-color`，精确补全结合展开上下文与模块导出信息，文档摘要使用 `scribble/blueboxes`，REPL 使用独立的 Racket 终端进程。lexer 未分类的符号不会统一标为变量，普通常量使用 `racketConstant`。
 

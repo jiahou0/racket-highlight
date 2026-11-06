@@ -194,27 +194,25 @@ export function registerRename(workspace: Workspace): vscode.Disposable {
         if (oldNames.size > 1) throw new Error('The source identifier denotes multiple definitions');
         const collectEdits = async (session: SemanticSession, ranges: SourceRange[]) => {
           const selected = new Set(ranges.map(rangeKey));
-          const relevant = session.analysis.annotations.filter(a => a.kind === 'binding' && a.actual
-            && (a.from && selected.has(rangeKey(a.from)) || a.to && selected.has(rangeKey(a.to))));
-          const ids = relevant.flatMap(a => a.id ? [a.id] : []);
-          const checked = await session.worker.request<RenameResult>('rename', { ids: [...new Set(ids)], name: newName }, token);
-          if (checked.conflicts.length) throw new Error('The new name conflicts with an existing binding');
+          const aliases = keys.size ? session.analysis.imports.filter(item => item.renamed && item.localAt
+            && selected.has(rangeKey(item.localAt)) && oldNames.has(item.original)) : [];
+          const importedNames = new Set<string>();
+          for (const alias of aliases) {
+            if (!alias.originalAt) throw new Error('Imported alias has no editable source name');
+            add(alias.originalAt, validName.text);
+            // Only the imported spelling changes. The local alias and all of
+            // its references keep their name, so their conflict callbacks do not apply.
+            importedNames.add(rangeKey(alias.originalAt));
+          }
+          const renamedRanges = new Set<string>();
           for (const range of ranges) {
+            if (importedNames.has(rangeKey(range))) continue;
             if (!range.source || range.source.startsWith('racket-source:')) throw new Error('Binding has no editable source');
             const snapshot = range.source === workspace.sourcePath(session.snapshot.uri) ? session.snapshot : await workspace.snapshot(vscode.Uri.file(range.source));
             if (!snapshot.contains(range)) throw new Error('Binding source range is no longer available');
             const spelling = snapshot.slice(range.start, range.end);
             const name = await decodeName(session, spelling);
-            const localAliases = keys.size ? session.analysis.imports.filter(({ renamed, localAt, name: localName }) =>
-              renamed && localAt && localName === name && ranges.some(range => sameRange(range, localAt))) : [];
-            if (localAliases.length) {
-              for (const item of localAliases) {
-                if (!oldNames.has(item.original)) continue;
-                if (!item.originalAt) throw new Error('Imported alias has no editable source name');
-                add(item.originalAt, checked.text);
-              }
-              continue;
-            }
+            if (aliases.some(alias => alias.name === name)) continue;
             const prefixEdge = session.analysis.annotations.find(edge => edge.kind === 'binding' && edge.actual && edge.require && edge.to && edge.to.source === range.source
               && edge.to.start > range.start && edge.to.end === range.end);
             const target = prefixEdge?.to || range;
@@ -222,8 +220,15 @@ export function registerRename(workspace: Workspace): vscode.Disposable {
               const targetName = target === range ? name : await decodeName(session, snapshot.slice(target.start, target.end));
               if (!oldNames.has(targetName)) continue;
             }
-            add(target, checked.text);
+            add(target, validName.text);
+            renamedRanges.add(rangeKey(range));
           }
+          const ids = session.analysis.annotations.filter(a => a.kind === 'binding' && a.actual
+            && (a.from && renamedRanges.has(rangeKey(a.from)) || a.to && renamedRanges.has(rangeKey(a.to))))
+            .flatMap(a => a.id ? [a.id] : []);
+          if (!ids.length) return;
+          const checked = await session.worker.request<RenameResult>('rename', { ids: [...new Set(ids)], name: newName }, token);
+          if (checked.conflicts.length) throw new Error('The new name conflicts with an existing binding');
         };
         const localRanges = [...new Map([...query.ranges, ...matchingRanges(original.analysis.annotations, keys)].map(range => [rangeKey(range), range])).values()];
         await collectEdits(original, localRanges);

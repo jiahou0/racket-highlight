@@ -22,7 +22,7 @@ interface PaintSpan {
   kind: 'style' | 'macro' | 'parameter' | 'function' | 'datum' | 'declaration' | 'unused';
   type?: string;
 }
-interface Coloring { text: string; spans: PaintSpan[] }
+interface Coloring { text: string; spans: PaintSpan[]; pendingLexical?: boolean }
 interface ColoringCache { original: Coloring; current: Coloring }
 
 // Rendering may outlive analysis. Keep only visual styles and UTF-16 ranges here,
@@ -68,16 +68,14 @@ function moveColoring(coloring: Coloring, changes: readonly vscode.TextDocumentC
   for (const change of [...changes].sort((a, b) => b.rangeOffset - a.rangeOffset)) {
     const start = change.rangeOffset, end = start + change.rangeLength;
     const delta = change.text.length - change.rangeLength;
-    const insertsNonWhitespace = start === end && change.text.trim().length > 0;
     spans = spans.flatMap(span => {
-      if (insertsNonWhitespace && span.start <= start && start <= span.end) return [];
       if (end <= span.start) return [{ ...span, start: span.start + delta, end: span.end + delta }];
       if (start >= span.end) return [span];
       return [];
     });
     text = text.slice(0, start) + change.text + text.slice(end);
   }
-  return { text, spans };
+  return { text, spans, pendingLexical: true };
 }
 
 function lexicalType(token: LexToken): string | undefined {
@@ -119,7 +117,7 @@ export function registerHighlighting(workspace: Workspace): vscode.Disposable[] 
       const config = vscode.workspace.getConfiguration('editor', { uri: document.uri, languageId: document.languageId });
       const coloring = colors.get(document.uri.toString())?.current;
       const ranges = new Map<string, vscode.Range>();
-      if (vscode.workspace.isTrusted && document.languageId === 'racket' && coloring && coloring.text === document.getText()
+      if (vscode.workspace.isTrusted && document.languageId === 'racket' && coloring && !coloring.pendingLexical && coloring.text === document.getText()
         && config.get<boolean>('showUnused', true)) {
         for (const span of coloring.spans) if (span.kind === 'unused') {
           ranges.set(`${span.start}:${span.end}`, new vscode.Range(document.positionAt(span.start), document.positionAt(span.end)));
@@ -183,6 +181,15 @@ export function registerHighlighting(workspace: Workspace): vscode.Disposable[] 
       if (!vscode.workspace.isTrusted) return builder.build();
       const lexical = await workspace.lexical(document, token);
       const coloring = colors.get(document.uri.toString())?.current;
+      if (coloring?.text === lexical.snapshot.original && coloring.pendingLexical) {
+        const starts = new Set(lexical.data.tokens.map(item => lexical.snapshot.rawOffset(item.start)));
+        const ends = new Set(lexical.data.tokens.map(item => lexical.snapshot.rawOffset(item.end)));
+        // Adjacent edits can join identifiers without touching either old span.
+        // Fresh native sub-token annotations are left intact; moved ones must
+        // still start and end at complete lexer-token boundaries.
+        coloring.spans = coloring.spans.filter(span => starts.has(span.start) && ends.has(span.end));
+        coloring.pendingLexical = false;
+      }
       const spans = coloring?.text === lexical.snapshot.original ? coloring.spans : [];
       const parameters: vscode.Range[] = [];
       const functions: vscode.Range[] = [];

@@ -3,7 +3,7 @@ import { SemanticSession, Workspace } from './workspace';
 import { Annotation, BackendEdit, CompletionCandidate } from './protocol';
 import { assertNotCancelled, atPosition, isCancellation, sameRange } from './documents';
 import { completionContext, localSignatureHelp } from './source';
-import { expressionAt, surrounding } from './structural';
+import { expressionRanges, surrounding } from './structural';
 
 function documentationAt(session: SemanticSession, source: string, offset: number): Annotation[] {
   return session.analysis.annotations.filter(annotation => annotation.kind === 'documentation' && atPosition(annotation.at, source, offset));
@@ -123,18 +123,21 @@ export function registerEditor(workspace: Workspace): vscode.Disposable[] {
         return new vscode.CompletionList(items, true);
       }
       const candidates = await session.worker.request<CompletionCandidate[]>('complete',
-        { position: offset, start: wordStart, end: wordEnd }, token);
+        { position: offset, start: wordStart, end: wordEnd, prefix }, token);
       lexical.assertCurrent();
       workspace.assertCurrent(session);
       if (session.snapshot.version !== snapshot.version) throw new vscode.CancellationError();
-      return candidates.map(candidate => {
+      const items = candidates.map(candidate => {
         const item = new vscode.CompletionItem(candidate.name, candidate.kind === 'macro' ? vscode.CompletionItemKind.Keyword
+          : candidate.kind === 'function' ? vscode.CompletionItemKind.Function
           : candidate.kind === 'variable' ? vscode.CompletionItemKind.Variable : vscode.CompletionItemKind.Text);
         item.insertText = candidate.insert;
+        item.filterText = candidate.insert;
         item.range = range;
         item.detail = [candidate.origin, candidate.space ? `space ${candidate.space}` : '', candidate.phase !== 0 ? `phase ${candidate.phase}` : ''].filter(Boolean).join(' · ');
         return item;
       });
+      return new vscode.CompletionList(items, true);
     },
   }, '/', ':', '"'));
 
@@ -205,9 +208,8 @@ export function registerEditor(workspace: Workspace): vscode.Disposable[] {
         const lexical = await workspace.lexical(document, token);
         const result = await Promise.all(positions.map(async position => {
           const offset = lexical.snapshot.offset(position);
-          const expression = await expressionAt(lexical, offset, token);
-          const ranges = [...surrounding(lexical, offset), ...(expression && expression.start <= offset && expression.end >= offset ? [expression] : [])]
-            .sort((a, b) => b.end - b.start - (a.end - a.start));
+          const ranges = (await expressionRanges(lexical, offset, token))
+            .filter(range => range.start <= offset && offset <= range.end).reverse();
           let parent: vscode.SelectionRange | undefined;
           for (const range of ranges) parent = new vscode.SelectionRange(lexical.snapshot.range(range.start, range.end), parent);
           return parent || new vscode.SelectionRange(new vscode.Range(position, position));

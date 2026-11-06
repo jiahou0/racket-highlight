@@ -2,7 +2,7 @@
   "name": "racket-highlight",
   "displayName": "Racket Workbench",
   "description": "Racket editing and module interactions powered by Racket’s reader, expander, and Check Syntax.",
-  "version": "0.2.36",
+  "version": "0.2.37",
   "publisher": "racket-workbench-local",
   "private": true,
   "license": "UNLICENSED",

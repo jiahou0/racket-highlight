@@ -1,10 +1,39 @@
 import * as vscode from 'vscode';
 import { BackendEdit, ExpressionRange, ReaderNode } from './protocol';
 import { LexicalSession, Workspace } from './workspace';
-import { Snapshot, isCancellation, isRacket } from './documents';
+import { Snapshot, assertNotCancelled, isCancellation, isRacket } from './documents';
+
+function readerPath(session: LexicalSession, start: number, end = start): ReaderNode[] {
+  const path: ReaderNode[] = [];
+  let siblings = session.data.structure.forms;
+  while (true) {
+    const node = siblings.find(node => node.start <= start && end <= node.end && (start !== end || start < node.end))
+      || (start === end ? siblings.find(node => node.end === start) : undefined);
+    if (!node) return path;
+    path.push(node);
+    siblings = node.children;
+  }
+}
+
+export async function expressionRanges(session: LexicalSession, position: number, token?: vscode.CancellationToken): Promise<{ start: number; end: number; kind?: ReaderNode['kind'] }[]> {
+  session.assertCurrent();
+  assertNotCancelled(token);
+  const at = session.data.tokens.find(token => token.start <= position && position < token.end);
+  if (at && (at.attributes['comment?'] || ['comment', 'sexp-comment', 'error'].includes(at.attributes.type))) return [];
+  const path = readerPath(session, position);
+  if (path.length) return path.reverse();
+  // Other readers and incomplete forms still use the language's lexical navigation.
+  const expression = await session.request<{ start: number; end: number } | false>('expression', { position }, token);
+  const ranges = [...surrounding(session, position), ...(expression ? [expression] : [])];
+  return [...new Map(ranges.map(range => [`${range.start}:${range.end}`, range])).values()]
+    .sort((a, b) => a.end - a.start - (b.end - b.start));
+}
 
 export async function expressionAt(session: LexicalSession, position: number, token?: vscode.CancellationToken): Promise<{ start: number; end: number } | undefined> {
-  return await session.request<{ start: number; end: number } | false>('expression', { position }, token) || undefined;
+  const ranges = await expressionRanges(session, position, token);
+  let index = 0;
+  while (ranges[index + 1]?.kind === 'prefix') index++;
+  return ranges[index];
 }
 
 export function surrounding(session: LexicalSession, position: number): ExpressionRange[] {
@@ -55,14 +84,7 @@ function expressionPath(lexical: LexicalSession, selection: vscode.Selection): R
   if (selection.isEmpty && token && (token.attributes['comment?'] || ['comment', 'sexp-comment', 'error'].includes(token.attributes.type))) {
     throw new Error('No readable expression at the cursor');
   }
-  const path: ReaderNode[] = [];
-  let siblings = lexical.data.structure.forms;
-  while (true) {
-    const node = siblings.find(n => n.start <= start && end <= n.end && (!selection.isEmpty || position < n.end))
-      || (selection.isEmpty ? siblings.find(n => n.end === position) : undefined);
-    if (!node) break;
-    path.push(node); siblings = node.children;
-  }
+  const path = readerPath(lexical, start, end);
   if (!path.length) throw new Error('No readable expression at the cursor');
   if (!selection.isEmpty && !path.some(n => n.start === start && n.end === end)) {
     throw new Error('Select a complete expression');
@@ -194,7 +216,7 @@ export function registerStructuralEditing(workspace: Workspace): vscode.Disposab
   }
   command('racket.selectExpression', async (editor, lexical, assertCurrent) => {
     const at = lexical.snapshot.offset(editor.selection.active);
-    const candidates = [await expressionAt(lexical, at), ...surrounding(lexical, at)].filter(range => range !== undefined);
+    const candidates = await expressionRanges(lexical, at);
     assertCurrent();
     const selected = candidates.find(range => {
       const target = lexical.snapshot.range(range.start, range.end);

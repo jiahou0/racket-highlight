@@ -1,7 +1,7 @@
 #lang racket/base
 
 (require racket/class racket/list racket/match racket/path racket/port racket/string racket/keyword-transform
-         drracket/check-syntax scribble/blueboxes syntax/modresolve syntax/kerncase "common.rkt")
+         drracket/check-syntax scribble/blueboxes syntax/modresolve syntax/kerncase syntax/id-table "common.rkt")
 (provide main)
 
 (define collector%
@@ -112,7 +112,11 @@
 
 (struct candidate (identifier phase space kind origin) #:transparent)
 (struct context (syntax phase start end) #:transparent)
-(struct model (candidates contexts imports issues literals quoted applications details exports exports-complete?) #:transparent)
+(struct model (candidates bindings contexts imports issues literals quoted applications details exports exports-complete?) #:transparent)
+
+(define (candidates-for-binding bindings id phase)
+  (define table (hash-ref bindings phase #f))
+  (if table (free-id-table-ref table id '()) '()))
 
 ;; Equal printed names do not identify an imported binding. Compare the actual
 ;; defining module and submodule as well as the name reported by Check Syntax.
@@ -228,14 +232,17 @@
       [(#%plain-lambda . _) #t]
       [(case-lambda . _) #t]
       [_ #f]))
-  (define (function-binding-detail ids rhs phase)
+  (define (value-binding-kind ids rhs phase)
     (define names (syntax->list ids))
-    (when (and names (= (length names) 1) (lambda-expression? rhs phase))
-      (define id (car names))
-      (define at (syntax-location id))
-      (when (and at (identifier? id)
-                 (eq? (hash-ref source-identifiers at #f) (syntax-e id)))
-        (set! details (cons (hasheq 'kind "identifierKind" 'at at 'type "function") details)))))
+    (cond
+      [(and names (= (length names) 1) (lambda-expression? rhs phase))
+       (define id (car names))
+       (define at (syntax-location id))
+       (when (and at (identifier? id)
+                  (eq? (hash-ref source-identifiers at #f) (syntax-e id)))
+         (set! details (cons (hasheq 'kind "identifierKind" 'at at 'type "function") details)))
+       "function"]
+      [else "variable"]))
   (define (application-operators operator phase)
     ;; Optional/keyword procedures can expand into calls to hidden procedures.
     ;; Racket publishes the original identifier through these official APIs.
@@ -284,7 +291,8 @@
                        (or (not only) (member original only)) (not (member original except)))
               (define name (or renamed (string->symbol (string-append prefix (symbol->string original)))))
               (define actual-space (or space export-space))
-              (define id (datum->syntax spec name spec spec))
+              ;; Import candidates carry scope, not a definition at the require site.
+              (define id (datum->syntax spec name #f spec))
               (define scoped (if actual-space ((make-interned-syntax-introducer actual-space) id 'add) id))
               (define p (phase+ phase export-phase))
               (define binding (identifier-binding scoped p))
@@ -344,8 +352,7 @@
       (define ids (first parts))
       ;; Internal definitions retain their origin on the binding clause.
       (source-origin (syntax-property clause 'origin) phase)
-      (function-binding-detail ids (second parts) phase)
-      (walk ids phase "variable")))
+      (walk ids phase (value-binding-kind ids (second parts) phase))))
   (define (walk value phase [kind "identifier"])
     (cond
       [(syntax? value)
@@ -382,12 +389,10 @@
                (for ([id (in-list (syntax->list #'ids))]) (definition-detail id value phase "macro"))
                (walk #'ids phase "macro") (walk #'rhs (phase+ phase 1)))]
             [(define-values ids rhs)
-             (begin
-               (function-binding-detail #'ids #'rhs phase)
+             (let ([kind (value-binding-kind #'ids #'rhs phase)])
                (for ([id (in-list (syntax->list #'ids))])
-                 (definition-detail id value phase
-                   (if (lambda-expression? #'rhs phase) "function" "variable")))
-               (walk #'ids phase "variable") (walk #'rhs phase))]
+                 (definition-detail id value phase kind))
+               (walk #'ids phase kind) (walk #'rhs phase))]
             [(#%plain-lambda ids body ...)
              (begin (walk #'ids phase "variable") (walk #'(body ...) phase))]
             [(case-lambda (ids body ...) ...)
@@ -421,6 +426,13 @@
       [(vector? value) (for ([v (in-vector value)]) (walk v phase kind))]
       [(box? value) (walk (unbox value) phase kind)]))
   (walk expanded 0)
+  ;; Index actual bindings, not printed names: import aliases can have different
+  ;; spellings while denoting the same binding. Each phase needs its own table.
+  (define bindings (make-hash))
+  (for ([c (in-list candidates)] #:unless (equal? (candidate-kind c) "identifier"))
+    (define phase (candidate-phase c))
+    (define table (hash-ref! bindings phase (lambda () (make-free-id-table #:phase phase))))
+    (free-id-table-update! table (candidate-identifier c) (lambda (items) (cons c items)) '()))
   ;; Optional and keyword parameters can become let bindings during expansion.
   ;; Match source formals to real expanded binders instead of relying on their
   ;; final position in a core lambda's argument list.
@@ -430,22 +442,19 @@
     (when (and at (eq? (hash-ref parameter-locations (cons at (candidate-phase c)) #f) (syntax-e id)))
       (set! details (cons (hasheq 'kind "identifierKind" 'at at 'type "parameter") details))))
   (for* ([origin (in-list (remove-duplicates retained-origins))]
-         [c (in-list candidates)]
+         [c (in-list (candidates-for-binding bindings (car origin) (cdr origin)))]
          #:when (and (equal? (candidate-kind c) "macro")
-                     (equal? (candidate-phase c) (cdr origin))
-                     (identifier-binding (candidate-identifier c) (cdr origin))
-                     (free-identifier=? (car origin) (candidate-identifier c) (cdr origin))))
+                     (identifier-binding (candidate-identifier c) (cdr origin))))
     (set! details (cons (hasheq 'kind "identifierKind" 'at (syntax-location (car origin))
                                'type "macro") details)))
-  (for* ([call (in-list call-identifiers)] [c (in-list candidates)]
-         #:when (and (member (candidate-kind c) '("variable" "macro"))
-                     (equal? (candidate-phase c) (cdr call))
-                     (free-identifier=? (car call) (candidate-identifier c) (cdr call))))
+  (for* ([call (in-list call-identifiers)]
+         [c (in-list (candidates-for-binding bindings (car call) (cdr call)))]
+         #:when (equal? (candidate-origin c) ""))
     (define target (syntax-location (candidate-identifier c)))
     (when (and target (equal? (hash-ref target 'source) path))
       (set! details (cons (hasheq 'kind "callBinding" 'at (syntax-location (car call))
                                   'definitionAt target) details))))
-  (model candidates contexts (reverse imports) (reverse issues) (reverse literals) quoted applications
+  (model candidates bindings contexts (reverse imports) (reverse issues) (reverse literals) quoted applications
          (remove-duplicates (reverse details)) exports exports-complete?))
 
 (define current-env #f)
@@ -462,7 +471,7 @@
                (lambda (c)
                  (define id (candidate-identifier c))
                  (define at (syntax-location id))
-                 (and at (member (candidate-kind c) '("variable" "macro"))
+                 (and at (member (candidate-kind c) '("variable" "function" "macro"))
                       (equal? (hash-ref at 'source) (environment-path current-env))
                       (= (hash-ref at 'start) (hash-ref params 'start))
                       (= (hash-ref at 'end) (hash-ref params 'end))
@@ -527,6 +536,7 @@
   (define start (hash-ref params 'start))
   (define end (hash-ref params 'end))
   (define pos (hash-ref params 'position))
+  (define prefix (hash-ref params 'prefix ""))
   (call-in-environment
    current-env
    (lambda ()
@@ -549,9 +559,11 @@
         (define phase (context-phase ctx))
         (for/fold ([result '()] #:result (reverse result)) ([c (in-list (model-candidates data))])
           (define name (syntax-e (candidate-identifier c)))
+          (define spelling (format "~s" name))
           (define key (list name (candidate-space c)))
           (cond
             [(and (not (hash-has-key? seen key))
+                  (string-prefix? spelling prefix)
                   (equal? phase (candidate-phase c))
                   (or (equal? (candidate-origin c) "")
                       (list? (identifier-binding (candidate-identifier c) phase)))
@@ -566,14 +578,12 @@
                          (free-identifier=? scoped-reference (candidate-identifier c) phase))))
              (define kinds
                (remove-duplicates
-                (for/list ([other (in-list (model-candidates data))]
-                           #:when (and (not (equal? (candidate-kind other) "identifier"))
-                                       (equal? phase (candidate-phase other))
-                                       (free-identifier=? (candidate-identifier c) (candidate-identifier other) phase)))
+                (for/list ([other (in-list (candidates-for-binding (model-bindings data) (candidate-identifier c) phase))])
                   (candidate-kind other))))
+             (define specific-kinds (if (member "function" kinds) (remove "variable" kinds) kinds))
              (hash-set! seen key #t)
-             (cons (hasheq 'name (symbol->string name) 'insert (format "~s" name)
-                           'kind (if (= (length kinds) 1) (car kinds) "identifier") 'origin (candidate-origin c)
+             (cons (hasheq 'name (symbol->string name) 'insert spelling
+                           'kind (if (= (length specific-kinds) 1) (car specific-kinds) "identifier") 'origin (candidate-origin c)
                            'phase (json-value phase) 'space (json-value (candidate-space c))) result)]
             [else result]))]))))
 

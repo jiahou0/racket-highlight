@@ -610,19 +610,34 @@ export class Workspace implements vscode.Disposable {
   async sourceFiles(token?: vscode.CancellationToken): Promise<vscode.Uri[]> {
     const files = await vscode.workspace.findFiles('**/*', '**/{.git,node_modules,compiled}/**', undefined, token);
     const result = new Map<string, vscode.Uri>();
+    const header = Buffer.alloc(4096);
     for (const file of files) {
       assertNotCancelled(token);
-      if (/\.(?:vsix|zo|dep|png|jpe?g|gif|pdf|zip|woff2?|ttf|mp[34])$/i.test(file.path)) continue;
-      const text = this.findDocument(file)?.getText() ?? await fs.readFile(file.fsPath, 'utf8');
-      if (text.includes('\0')) continue;
-      if (/^\s*(?:(?:;[^\n]*|#![^\n]*)(?:\n|$)\s*)*(?:#(?:lang|reader)\b|\(module\b)/.test(text)
-          || /\.(?:rkt|ss|scm|scrbl|rhm)$/i.test(file.path)) result.set(file.toString(), file);
+      if (/\.(?:rkt|rktl|ss|scm|scrbl|rhm)$/i.test(file.path)) {
+        result.set(file.toString(), file);
+        continue;
+      }
+      if (/\.(?:rktd|vsix|zo|dep|png|jpe?g|gif|pdf|zip|woff2?|ttf|mp[34])$/i.test(file.path)) continue;
+      const document = this.findDocument(file);
+      let text: string;
+      if (document) text = document.getText(new vscode.Range(new vscode.Position(0, 0), document.positionAt(header.length)));
+      else {
+        const handle = await fs.open(file.fsPath, 'r');
+        try {
+          const { bytesRead } = await handle.read(header, 0, header.length, 0);
+          text = header.toString('utf8', 0, bytesRead);
+        } finally { await handle.close(); }
+      }
+      if (!text.includes('\0') && /^\s*(?:(?:;[^\n]*|#![^\n]*)(?:\n|$)\s*)*(?:#(?:lang|reader)\b|\(module\b)/.test(text)) {
+        result.set(file.toString(), file);
+      }
     }
     for (const doc of vscode.workspace.textDocuments) {
-      if (!doc.isClosed && isRacket(doc) && doc.uri.scheme === 'file' && !doc.fileName.endsWith('.rktd')) {
+      if (!doc.isClosed && isRacket(doc) && doc.uri.scheme === 'file' && !/\.rktd$/i.test(doc.fileName)) {
         result.set(doc.uri.toString(), doc.uri);
       }
     }
+    assertNotCancelled(token);
     return [...result.values()];
   }
 

@@ -22,8 +22,9 @@ export class Relations implements vscode.TreeDataProvider<Node>, vscode.Disposab
   private styles = new Map<string, vscode.TextEditorDecorationType>();
   private revision = 0;
   private followCursor = true;
+  private readonly view: vscode.TreeView<Node>;
   constructor(private workspace: Workspace) {
-    const view = vscode.window.createTreeView('racket.relations', { treeDataProvider: this, showCollapseAll: true });
+    const view = this.view = vscode.window.createTreeView('racket.relations', { treeDataProvider: this, showCollapseAll: true });
     void vscode.commands.executeCommand('setContext', 'racket.relations.followCursor', true);
     const refresh = () => {
       const editor = vscode.window.activeTextEditor;
@@ -32,13 +33,17 @@ export class Relations implements vscode.TreeDataProvider<Node>, vscode.Disposab
       this.decorate();
     };
     this.subscriptions.push(view,
+      view.onDidChangeVisibility(() => {
+        if (view.visible) refresh();
+        else this.clearDecorations();
+      }),
       workspace.ready.event(session => {
         if (session.snapshot.uri.toString() === vscode.window.activeTextEditor?.document.uri.toString()) refresh();
       }),
       workspace.changed.event(refresh),
       vscode.window.onDidChangeActiveTextEditor(refresh),
       vscode.window.onDidChangeTextEditorSelection(event => {
-        if (event.textEditor !== vscode.window.activeTextEditor) return;
+        if (!view.visible || event.textEditor !== vscode.window.activeTextEditor) return;
         if (this.followCursor) this.emitter.fire(undefined);
         this.decorate();
       }),
@@ -170,6 +175,7 @@ export class Relations implements vscode.TreeDataProvider<Node>, vscode.Disposab
     for (const editor of vscode.window.visibleTextEditors) for (const style of this.styles.values()) editor.setDecorations(style, []);
   }
   private decorate(): void {
+    if (!this.view.visible) return;
     this.clearDecorations();
     const editor = vscode.window.activeTextEditor, session = this.session;
     if (!editor || !session || !session.analysis.complete || editor.document.uri.toString() !== session.snapshot.uri.toString()
