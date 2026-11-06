@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { Snapshot, isCancellation, isRacket } from './documents';
+import { documentSnapshot, isCancellation, isRacket } from './documents';
 import { BackendEdit, Worker } from './protocol';
 import { Workspace } from './workspace';
 
@@ -11,7 +11,7 @@ export function registerOrganize(workspace: Workspace): vscode.Disposable {
       const document = uri ? await vscode.workspace.openTextDocument(uri) : vscode.window.activeTextEditor?.document;
       if (!document || !isRacket(document)) return;
       const editor = await vscode.window.showTextDocument(document);
-      const snapshot = new Snapshot(document.uri, document.getText(), document.version);
+      const snapshot = documentSnapshot(document);
       worker = new Worker(workspace.context, 'organize', document.uri, workspace.log);
       const result = await worker.request<{ edits: BackendEdit[]; count: number }>('organize', {
         path: workspace.sourcePath(document.uri), text: snapshot.text,

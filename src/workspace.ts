@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { promises as fs } from 'node:fs';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { Worker, Analysis, BackendError, CompletionName, DocumentParameters, Lexical, RacketError, SourceRange } from './protocol';
-import { Snapshot, assertNotCancelled, isCancellation, isRacket } from './documents';
+import { Snapshot, assertNotCancelled, awaitWithCancellation, documentSnapshot, isCancellation, isRacket } from './documents';
 
 export interface SemanticSession { worker: Worker; snapshot: Snapshot; analysis: Analysis; epoch: number }
 export interface LexicalSession {
@@ -10,6 +10,20 @@ export interface LexicalSession {
   data: Lexical;
   assertCurrent(): void;
   request<T>(method: string, params: unknown, token?: vscode.CancellationToken): Promise<T>;
+}
+
+export function dependsOnFiles(dependencies: readonly string[] | undefined, changedFiles: Iterable<string>): boolean {
+  if (!dependencies?.length) return true;
+  const normalize = (path: string) => process.platform === 'linux' ? resolve(path) : resolve(path).toLowerCase();
+  const changed = [...changedFiles].map(normalize);
+  return dependencies.some(path => {
+    const dependency = normalize(path);
+    // Directory reads cover descendants; retain the same logical path rules
+    // as the source loader rather than resolving symlinks differently here.
+    return changed.some(file => dependency === file
+      || file.startsWith(dependency.endsWith(sep) ? dependency : dependency + sep)
+      || dependency.startsWith(file.endsWith(sep) ? file : file + sep));
+  });
 }
 
 export function requireSemanticAnalysis(session: SemanticSession | undefined): asserts session is SemanticSession {
@@ -23,6 +37,7 @@ interface SemanticEntry {
   snapshot?: Snapshot;
   session?: SemanticSession;
   pending: boolean;
+  failure?: Error;
   promise: Promise<SemanticSession>;
 }
 interface LexicalEntry { worker: Worker; epoch: number; text: string; stale: boolean; ready: boolean; promise: Promise<Lexical> }
@@ -32,6 +47,7 @@ export class Workspace implements vscode.Disposable {
   private epoch = 0;
   private revision = 0;
   private disposed = false;
+  private reportedErrors = new WeakSet<Error>();
   private semanticEntries = new Map<string, SemanticEntry>();
   private lastCompletionNames = new Map<string, CompletionName[]>();
   private lexicalEntries = new Map<string, LexicalEntry>();
@@ -119,30 +135,25 @@ export class Workspace implements vscode.Disposable {
     if (this.disposed) return;
     this.revision++;
     const key = uri.toString();
-    const normalize = (path: string) => process.platform === 'linux' ? resolve(path) : resolve(path).toLowerCase();
-    const changed = normalize(this.sourcePath(uri));
     const dependsOnEdit = (worker: Worker | undefined) => {
       const paths = worker && this.workerDependencies.get(worker);
       if (!worker || worker.busy || !paths) return true;
-      // Unsaved edits change source overlays, not disk. Use the same logical
-      // paths as the loader; directory reads conservatively cover descendants.
-      return paths.some(path => {
-        const dependency = normalize(path);
-        return dependency === changed || changed.startsWith(dependency.endsWith(sep) ? dependency : dependency + sep)
-          || dependency.startsWith(changed + sep);
-      });
+      return dependsOnFiles(paths, [this.sourcePath(uri)]);
     };
     for (const [owner, entry] of this.semanticEntries) {
-      if (owner !== key && !entry.pending && entry.session?.analysis.complete && !dependsOnEdit(entry.worker)) continue;
+      if (owner !== key && (uri.scheme !== 'file' || !entry.pending && entry.session?.analysis.complete && !dependsOnEdit(entry.worker))) continue;
       this.semanticEntries.delete(owner);
       entry.worker?.dispose();
       this.diagnosticContributions.delete(`semantic:${owner}`);
     }
     for (const [owner, entry] of this.lexicalEntries) {
-      if (owner !== key && entry.ready && !entry.stale && !dependsOnEdit(entry.worker)) continue;
+      if (owner !== key && (uri.scheme !== 'file' || entry.ready && !entry.stale && !dependsOnEdit(entry.worker))) continue;
       if (owner === key) entry.stale = true;
       else { this.lexicalEntries.delete(owner); entry.worker.dispose(); }
       this.diagnosticContributions.delete(`reader:${owner}`);
+    }
+    for (const owner of this.recentlyClosed.keys()) {
+      if (!this.semanticEntries.has(owner) && !this.lexicalEntries.has(owner)) this.recentlyClosed.delete(owner);
     }
     this.syncDependencies();
     this.refreshDiagnostics();
@@ -223,9 +234,10 @@ export class Workspace implements vscode.Disposable {
     const cached = this.semanticEntries.get(key);
     const lexical = this.lexicalEntries.get(key);
     const text = document.getText();
-    if ((cached?.snapshot && cached.snapshot.original !== text) || (!cached && document.isDirty)
+    if ((cached?.snapshot && cached.snapshot.original !== text) || (!cached && document.isDirty && document.uri.scheme === 'file')
       || (lexical && lexical.text !== text)) {
-      this.invalidate();
+      if (document.uri.scheme === 'file') this.invalidate();
+      else this.invalidateEdit(document.uri);
       this.check(document);
       return;
     }
@@ -248,10 +260,10 @@ export class Workspace implements vscode.Disposable {
     this.diagnosticContributions.delete(`reader:${key}`);
     this.refreshDiagnostics();
     if (document.uri.scheme !== 'file') {
+      this.invalidateEdit(document.uri);
       this.recentlyClosed.delete(key);
       this.lexicalEntries.get(key)?.worker.dispose(); this.lexicalEntries.delete(key);
       this.releaseClosed(document.uri);
-      if (document.uri.scheme === 'untitled') this.invalidate();
       return;
     }
     if (document.isDirty) { this.invalidate(); return; }
@@ -289,7 +301,7 @@ export class Workspace implements vscode.Disposable {
 
   async snapshot(uri: vscode.Uri): Promise<Snapshot> {
     const open = this.findDocument(uri);
-    if (open) return new Snapshot(uri, open.getText(), open.version);
+    if (open) return documentSnapshot(open);
     return new Snapshot(uri, await fs.readFile(uri.fsPath, 'utf8'));
   }
 
@@ -317,10 +329,10 @@ export class Workspace implements vscode.Disposable {
     if (!session.worker.running || session.epoch !== this.epoch) return;
     const document = this.findDocument(uri);
     if (!document) return session;
-    const text = document.getText();
-    if (text !== session.snapshot.original) return;
-    if (document.version === session.snapshot.version) return session;
-    entry.session = { ...session, snapshot: new Snapshot(uri, text, document.version) };
+    const snapshot = documentSnapshot(document);
+    if (snapshot.original !== session.snapshot.original) return;
+    if (snapshot === session.snapshot) return session;
+    entry.session = { ...session, snapshot };
     return entry.session;
   }
 
@@ -351,7 +363,7 @@ export class Workspace implements vscode.Disposable {
     assertNotCancelled(token);
     const cached = this.semanticEntries.get(uri.toString());
     if (!cached) return;
-    const session = await cached.promise;
+    const session = await awaitWithCancellation(cached.promise, token);
     this.assertCurrent(session);
     assertNotCancelled(token);
     return this.current(uri);
@@ -364,17 +376,31 @@ export class Workspace implements vscode.Disposable {
     worker.dependenciesChanged.event(paths => {
       if (cache.get(key)?.worker !== worker) return;
       this.workerDependencies.set(worker, paths);
+      if (mode === 'semantic') {
+        const analysis = this.semanticEntries.get(key)?.session?.analysis;
+        // Later callbacks can read more sources. Keep that evidence even after
+        // the bounded cache evicts the worker but a rename retains its baseline.
+        if (analysis) analysis.dependencies = paths || [];
+      }
       this.syncDependencies();
     });
     worker.exited.event(error => {
       this.workerDependencies.delete(worker);
       if (isCancellation(error) || this.disposed) return;
       if (cache.get(key)?.worker !== worker) return;
+      // Pending requests own cleanup and error delivery. Removing their entry
+      // here would make their catch handlers mistake a crash for cancellation.
+      if (mode === 'semantic') {
+        const entry = this.semanticEntries.get(key)!;
+        if (entry.pending) { entry.failure = error; return; }
+      } else if (!this.lexicalEntries.get(key)!.ready) return;
       cache.delete(key);
+      if (!this.semanticEntries.has(key) && !this.lexicalEntries.has(key)) this.recentlyClosed.delete(key);
       this.syncDependencies();
       if (mode === 'semantic') {
         this.setDiagnostics(`semantic:${key}`, []);
         this.changed.fire();
+        this.updateStatus();
       }
       this.report(error, uri);
     });
@@ -393,7 +419,15 @@ export class Workspace implements vscode.Disposable {
     } finally {
       const remaining = this.activeQueries.get(key)! - 1;
       if (remaining) this.activeQueries.set(key, remaining);
-      else { this.activeQueries.delete(key); this.releaseClosed(uri); this.trimClosed(); }
+      else {
+        this.activeQueries.delete(key);
+        if (uri.scheme === 'file' && !this.findDocument(uri) && this.current(uri)?.analysis.complete) {
+          this.recentlyClosed.delete(key);
+          this.recentlyClosed.set(key, uri);
+        }
+        this.releaseClosed(uri);
+        this.trimClosed();
+      }
     }
   }
 
@@ -402,7 +436,7 @@ export class Workspace implements vscode.Disposable {
     const key = uri.toString();
     const cached = this.semanticEntries.get(key);
     if (cached) {
-      const session = await cached.promise;
+      const session = await awaitWithCancellation(cached.promise, token);
       this.assertCurrent(session);
       assertNotCancelled(token);
       const snapshot = await this.snapshot(uri);
@@ -451,13 +485,13 @@ export class Workspace implements vscode.Disposable {
           }
           entry.worker?.dispose();
           if (!this.disposed) this.syncDependencies();
-          throw current ? error : new vscode.CancellationError();
+          throw current ? entry.failure || error : new vscode.CancellationError();
         }
       }),
     };
     this.semanticEntries.set(key, entry);
     this.updateStatus();
-    const session = await entry.promise;
+    const session = await awaitWithCancellation(entry.promise, token);
     this.assertCurrent(session);
     assertNotCancelled(token);
     return this.current(uri) || session;
@@ -467,7 +501,7 @@ export class Workspace implements vscode.Disposable {
     this.assertTrusted(); assertNotCancelled(token);
     const key = document.uri.toString();
     const epoch = this.epoch;
-    const snapshot = new Snapshot(document.uri, document.getText(), document.version);
+    const snapshot = documentSnapshot(document);
     let entry = this.lexicalEntries.get(key);
     if (!entry || entry.epoch !== epoch || entry.stale || entry.text !== snapshot.original) {
       const previous = entry;
@@ -496,10 +530,11 @@ export class Workspace implements vscode.Disposable {
           this.syncDependencies();
           if (!isCancellation(error)) {
             const entries = error instanceof RacketError ? await this.locateErrors([error.details], 'Racket Reader') : [];
-            if (epoch === this.epoch && document.version === snapshot.version && !document.isClosed && !this.lexicalEntries.has(key)) {
-              this.setDiagnostics(`reader:${key}`, entries);
-              this.report(error, document.uri);
+            if (epoch !== this.epoch || document.version !== snapshot.version || document.isClosed || this.lexicalEntries.has(key)) {
+              throw new vscode.CancellationError();
             }
+            this.setDiagnostics(`reader:${key}`, entries);
+            this.report(error, document.uri);
           }
           throw error;
         }),
@@ -664,6 +699,10 @@ export class Workspace implements vscode.Disposable {
 
   report(error: unknown, uri?: vscode.Uri): void {
     if (this.disposed || isCancellation(error)) return;
+    if (error instanceof Error) {
+      if (this.reportedErrors.has(error)) return;
+      this.reportedErrors.add(error);
+    }
     const message = error instanceof Error ? error.message : String(error);
     this.log.appendLine(uri ? `${uri.fsPath}: ${message}` : message);
     if (!uri || uri.toString() === vscode.window.activeTextEditor?.document.uri.toString()) {

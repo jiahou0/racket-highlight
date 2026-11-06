@@ -45,6 +45,9 @@
   (define (children-of value)
     (cond [(syntax? value) (list value)]
           [(pair? value) (append (children-of (car value)) (children-of (cdr value)))]
+          [(vector? value) (append-map children-of (vector->list value))]
+          [(box? value) (children-of (unbox value))]
+          [(prefab-struct-key value) (children-of (struct->vector value))]
           [else '()]))
   (define (node stx)
     (define at (syntax-location stx))
@@ -61,7 +64,7 @@
           (define kind
             (cond [(and plain-list? (syntax->list stx)) "list"]
                   [plain-list? "dotted"]
-                  [(pair? value) "prefix"]
+                  [(or (pair? value) (box? value)) "prefix"]
                   [(or (symbol? value) (keyword? value) (string? value)
                        (number? value) (boolean? value) (char? value)) "atom"]
                   [else "opaque"]))

@@ -72,11 +72,11 @@ export class Worker implements vscode.Disposable {
   private pending = new Map<number, PendingRequest>();
   // Cancelling a caller stops its wait, not the request already sent to Racket.
   private inFlight = new Set<number>();
-  private stopped = false;
+  private stopReason?: Error;
   private decoders = new Map<string, StringDecoder>();
   readonly exited = new vscode.EventEmitter<Error>();
   readonly dependenciesChanged = new vscode.EventEmitter<string[] | undefined>();
-  get running(): boolean { return !this.stopped; }
+  get running(): boolean { return !this.stopReason; }
   get busy(): boolean { return this.inFlight.size > 0; }
 
   constructor(context: vscode.ExtensionContext, mode: 'semantic' | 'lexical' | 'organize', resource: vscode.Uri, log: vscode.OutputChannel,
@@ -89,7 +89,7 @@ export class Worker implements vscode.Disposable {
     });
     const lines = createInterface({ input: this.process.stdout });
     lines.on('line', line => {
-      if (this.stopped) return;
+      if (!this.running) return;
       try {
         const message = JSON.parse(line) as WorkerMessage;
         if (!message || typeof message !== 'object') throw new Error('Expected a response object');
@@ -120,19 +120,20 @@ export class Worker implements vscode.Disposable {
       }
     });
     this.process.stderr.setEncoding('utf8');
-    this.process.stderr.on('data', text => { if (!this.stopped) log.append(text); });
+    this.process.stderr.on('data', text => { if (this.running) log.append(text); });
     this.process.stdin.on('error', error => this.stop(error));
     this.process.on('error', error => this.stop(new Error(`Unable to start Racket: ${error.message}`)));
     this.process.on('close', (code, signal) => {
       lines.close();
-      if (!this.stopped) for (const decoder of this.decoders.values()) log.append(decoder.end());
+      if (this.running) for (const decoder of this.decoders.values()) log.append(decoder.end());
       this.decoders.clear();
       this.stop(new Error(`Racket ${mode} process exited (${signal || code})`));
     });
   }
 
   async request<T>(method: string, params: unknown = {}, token?: vscode.CancellationToken): Promise<T> {
-    if (this.stopped || token?.isCancellationRequested) throw new vscode.CancellationError();
+    if (token?.isCancellationRequested) throw new vscode.CancellationError();
+    if (this.stopReason) throw this.stopReason;
     const id = ++this.nextId;
     // Prepared requests own their overlays; later callbacks collect fresh text.
     if (this.documents && params && typeof params === 'object' && !('documents' in params)) {
@@ -160,8 +161,8 @@ export class Worker implements vscode.Disposable {
   }
 
   private stop(error: Error): void {
-    if (this.stopped) return;
-    this.stopped = true;
+    if (!this.running) return;
+    this.stopReason = error;
     this.inFlight.clear();
     for (const id of this.pending.keys()) this.takeRequest(id)?.reject(error);
     this.exited.fire(error);

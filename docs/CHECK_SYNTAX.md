@@ -46,13 +46,17 @@ reader 提供完整表达式范围、嵌套和原始参数表。可选及关键�
 
 标准源码形式先按 reader 的准确范围和名称匹配，再通过真实绑定确认。展开可能为源码来源附加宏作用域，因此不能仅因 `syntax-original?` 为假就丢弃该来源。
 
+宏定义直接记录 `identifierKind`；局部绑定端的 phase 也进入定义位置索引。内部语法定义在完整展开后可能消失，因此同时读取 `origin`、`disappeared-use` 和 `disappeared-binding`，仅将已确认标准语法定义位置的消失绑定补入宏模型，不按同名文本猜测，也不将任意消失绑定统一认作宏。
+
+内部值绑定子句也收集上述三种属性。`struct` / `define-struct` 的源码名称只作为潜在语法绑定位置；实际展开或消失绑定确认后才补充宏类别，避免将 `#:omit-define-syntaxes` 下的构造器误标为宏。继承形式以及 `#:name`、`#:extra-name` 提供的语法名称同样保留。
+
 函数识别共用 `lambda-expression?`，依据展开后的 `#%plain-lambda` 和 `case-lambda`；`value-binding-kind` 同时提供函数着色与补全类别。`let-values` 与 `letrec-values` 通过 `walk-value-binders` 共同保留绑定子句的 `origin`、记录函数类别并遍历绑定标识符，避免内部定义的来源处理分叉。参数类别则将源码形参范围与展开后的真实绑定匹配，不仅依赖核心 lambda 中的位置。导入候选只保留作用域，不伪造位于 require 子句的本地定义位置。
 
 其他功能也各有来源：词法编辑使用 `syntax-color`，精确补全结合展开上下文与模块导出信息，文档摘要使用 `scribble/blueboxes`，REPL 使用独立的 Racket 终端进程。lexer 未分类的符号不会统一标为变量，普通常量使用 `racketConstant`。
 
 ## 名称与冲突请求
 
-前端向原语义 worker 发送 `rename` 请求，传入新名称和需要调用的冲突回调 ID。后端用 reader 读取单个标识符，返回统一的 `RenameResult`：
+前端向原语义 worker 发送 `rename` 请求，传入新名称和需要调用的冲突回调 ID。前缀导入的名称冲突请求另带解码后的 `prefix`。后端用 reader 读取单个标识符，再拼接该前缀用于局部名称检查，返回统一的 `RenameResult`：
 
 | 字段 | 含义 |
 | --- | --- |
@@ -61,6 +65,8 @@ reader 提供完整表达式范围、嵌套和原始参数表。可选及关键�
 | `conflicts` | 报告名称冲突的回调 ID 列表 |
 
 空 ID 列表只进行名称读取，不表示所有绑定均无冲突。回调闭包保留在生成它们的 worker 中，ID 不能跨会话复用。冲突列表为空也不能替代重新展开；完整的修改流程见[绑定与重命名](ARCHITECTURE.md#绑定与重命名)。
+
+修改前缀定义时还传入解码后的 `oldPrefix`；`name` 此时是完整引用的源码拼写，后端读取后确认旧前缀并替换，再返回统一的名称与源码拼写。此流程不依赖引用上存在跨文件跳转注解。
 
 ## 边界
 

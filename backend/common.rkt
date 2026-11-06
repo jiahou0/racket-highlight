@@ -1,7 +1,9 @@
 #lang racket/base
 
 (require json net/base64 racket/file racket/list racket/path racket/port racket/string
-         syntax/modread)
+         syntax/modread
+         (only-in setup/dirs get-main-collects-search-dirs find-user-collects-dir get-pkgs-search-dirs find-user-pkgs-dir
+                  get-doc-search-dirs find-user-doc-dir))
 (provide json-value canonical normalize-text source-name location syntax-location failure
          serve read-module (struct-out environment) make-environment update-overlays!
          call-in-environment environment-source)
@@ -108,7 +110,16 @@
 
 ;; Each worker owns its namespace and source overlay. Source loading bypasses
 ;; compiled files for workspace modules, including their unopened dependencies.
-(struct environment (namespace path overlays sources dependencies loader) #:transparent)
+(struct environment (namespace path overlays sources dependencies loader record-dependency!) #:transparent)
+
+(define dependency-recording-enabled? (make-parameter #t))
+(define installed-roots
+  (map canonical (filter values (append (get-main-collects-search-dirs) (get-pkgs-search-dirs) (get-doc-search-dirs)
+                                       (list (find-user-collects-dir) (find-user-pkgs-dir) (find-user-doc-dir))))))
+
+(define (within-directory? path directory)
+  (or (equal? path directory)
+      (string-prefix? path (path->string (path->directory-path directory)))))
 
 (define (make-environment params)
   (define path (canonical (hash-ref params 'path)))
@@ -119,16 +130,22 @@
   (hash-set! overlays path (normalize-text (hash-ref params 'text)))
   (define roots
     (for/list ([root (in-list (hash-ref params 'roots '()))])
-      (path->string (path->directory-path (canonical root)))))
+      (canonical root)))
   (define sources (hash-copy overlays))
-  (define dependencies (make-hash))
+  (define dependencies (make-hash (list (cons path #t))))
   (define original-loader (current-load/use-compiled))
   (define (workspace-path? p)
     (for/or ([root (in-list roots)])
-      (string-prefix? p root)))
+      (within-directory? p root)))
+  (define (record-dependency! full)
+    (when (and (dependency-recording-enabled?)
+               (or (hash-has-key? overlays full) (workspace-path? full)
+                   (and (not (for/or ([root (in-list installed-roots)]) (within-directory? full root)))
+                        (not (member (string->path "compiled") (explode-path (string->path full)))))))
+      (hash-set! dependencies full #t)))
   (define (loader filename expected)
     (define full (canonical filename))
-    (hash-set! dependencies full #t)
+    (record-dependency! full)
     (cond
       [(and expected (or (hash-has-key? overlays full)
                          (and (workspace-path? full) (file-exists? full))))
@@ -139,7 +156,7 @@
          ;; independently of the namespace that requested this dependency.
          (eval-syntax (check-module-form (read-module full text) expected full)))]
       [else (original-loader filename expected)]))
-  (environment (make-base-namespace) path overlays sources dependencies loader))
+  (environment (make-base-namespace) path overlays sources dependencies loader record-dependency!))
 
 ;; Retained workers may first read an unrelated editor buffer in a later
 ;; callback. Refresh unread overlays before that callback, not their namespaces.
@@ -159,7 +176,7 @@
     (hash-set! overlays path own-text)
     (hash-set! sources path own-text)))
 
-(define (call-in-environment env thunk)
+(define (call-in-environment env thunk #:record-dependencies? [record-dependencies? #t])
   (define directory (path-only (string->path (environment-path env))))
   (define parent (current-security-guard))
   (define recording? #f)
@@ -167,15 +184,16 @@
     (make-security-guard
      parent
      (lambda (_who path modes)
-       (when (and path (not recording?) (or (memq 'read modes) (memq 'exists modes)))
+       (when (and path (dependency-recording-enabled?) (not recording?) (or (memq 'read modes) (memq 'exists modes)))
          (set! recording? #t)
-         (hash-set! (environment-dependencies env) (canonical path) #t)
+         ((environment-record-dependency! env) (canonical path))
          (set! recording? #f)))
      (lambda _ (void))))
   (parameterize ([current-namespace (environment-namespace env)]
                  [current-directory directory]
                  [current-load-relative-directory directory]
                  [current-load/use-compiled (environment-loader env)]
+                 [dependency-recording-enabled? record-dependencies?]
                  [current-security-guard guard])
     (thunk)))
 

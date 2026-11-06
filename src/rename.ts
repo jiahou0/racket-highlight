@@ -1,10 +1,22 @@
 import * as vscode from 'vscode';
-import { Analysis, RenameResult, SourceRange, Worker } from './protocol';
+import { Analysis, Annotation, RenameResult, SourceRange, Worker } from './protocol';
 import { Snapshot, assertNotCancelled, atPosition, rangeKey, sameRange } from './documents';
-import { SemanticSession, Workspace, requireSemanticAnalysis } from './workspace';
-import { bindingAt, bindingKeys, matchingRanges } from './bindings';
+import { SemanticSession, Workspace, dependsOnFiles, requireSemanticAnalysis } from './workspace';
+import { annotationsAt, annotationsForBindings, bindingAt, bindingKeys, connected, matchingRanges } from './bindings';
 
-interface RenameEdit { range: SourceRange; text: string }
+interface RenameEdit {
+  range: SourceRange;
+  text: string;
+  prefixBoundary?: { before: number; after: number };
+}
+
+function renameTarget(annotations: Annotation[], range: SourceRange): SourceRange {
+  if (!range.source || range.end <= range.start) return range;
+  const prefixEdge = annotationsAt(annotations, range.source, range.end - 1).find(edge =>
+    edge.kind === 'binding' && edge.actual && edge.require && edge.to?.source === range.source
+    && edge.to.start > range.start && edge.to.end === range.end);
+  return prefixEdge?.to || range;
+}
 
 // Re-expansion is part of the rename operation. Name-dup callbacks alone do not
 // detect every change to imports, macro-generated bindings, or scope capture.
@@ -48,6 +60,11 @@ async function reanalyzeRename(workspace: Workspace, sessions: SemanticSession[]
         const { start, end } = edit.range;
         if (position <= start) break;
         if (position < end) {
+          // Check Syntax splits prefix imports at the prefix declaration's
+          // source width, which can differ from the decoded symbol length.
+          if (edit.prefixBoundary && position - start === edit.prefixBoundary.before) {
+            return start + delta + edit.prefixBoundary.after;
+          }
           if (position - start <= edit.sharedPrefix) return position + delta;
           if (end - position <= edit.sharedSuffix) return position + delta + edit.lengthChange;
           throw new Error('A macro source mapping cannot be preserved by this rename');
@@ -76,6 +93,8 @@ async function reanalyzeRename(workspace: Workspace, sessions: SemanticSession[]
   for (const session of sessions) {
     workspace.assertGeneration(generation, token);
     const path = workspace.sourcePath(session.snapshot.uri);
+    if (session.analysis.complete && !session.worker.busy
+      && !dependsOnFiles([path], changed.keys()) && !dependsOnFiles(session.analysis.dependencies, changed.keys())) continue;
     const snapshot = changed.get(path)?.after || session.snapshot;
     const params = workspace.parameters(snapshot);
     const documents = new Map(params.documents.map(doc => [doc.path, doc]));
@@ -102,7 +121,7 @@ export function registerRename(workspace: Workspace): vscode.Disposable {
       const query = bindingAt(session.analysis.annotations, source, offset);
       const at = query.ranges.filter(range => atPosition(range, source, offset)).sort((a, b) => a.end - a.start - (b.end - b.start))[0];
       const prefix = session.analysis.annotations.find(a => a.kind === 'prefix' && atPosition(a.prefixAt, source, offset));
-      const range = prefix?.prefixAt || at;
+      const range = prefix?.prefixAt || (at && renameTarget(session.analysis.annotations, at));
       if (!range) throw new Error('No editable binding at this position');
       return { range: session.snapshot.range(range.start, range.end), placeholder: session.snapshot.slice(range.start, range.end) };
     },
@@ -112,41 +131,55 @@ export function registerRename(workspace: Workspace): vscode.Disposable {
       requireSemanticAnalysis(original);
       const source = workspace.sourcePath(document.uri), offset = original.snapshot.offset(position);
       const prefix = original.analysis.annotations.find(a => a.kind === 'prefix' && atPosition(a.prefixAt, source, offset));
-      const query = bindingAt(original.analysis.annotations, source, offset);
-      if (query.unresolvedImports) {
-        throw new Error('The imported binding identity is unresolved or ambiguous');
-      }
-      if (new Set(query.edges.map(edge => JSON.stringify(edge.phase))).size > 1) {
-        throw new Error('The source range denotes bindings at multiple phases');
-      }
       const edits = new Map<string, RenameEdit>();
       const baselines = new Map<string, SemanticSession>([[document.uri.toString(), original]]);
       const renamed = new Map<string, string>();
-      const add = (range: SourceRange, text: string) => {
+      const add = (range: SourceRange, text: string, prefixBoundary?: RenameEdit['prefixBoundary']) => {
         const key = rangeKey(range);
         const previous = edits.get(key);
-        if (previous && previous.text !== text) throw new Error('Conflicting rename edits');
-        edits.set(key, { range, text });
+        if (previous && (previous.text !== text
+          || previous.prefixBoundary?.before !== prefixBoundary?.before || previous.prefixBoundary?.after !== prefixBoundary?.after)) {
+          throw new Error('Conflicting rename edits');
+        }
+        edits.set(key, { range, text, prefixBoundary });
       };
       if (prefix?.prefixAt) {
         const valid = await original.worker.request<RenameResult>('rename', { ids: [], name: newName }, token);
+        const lexical = await workspace.lexical(document, token);
+        workspace.assertCurrent(original);
+        lexical.assertCurrent();
+        if (lexical.snapshot.original !== original.snapshot.original) throw new vscode.CancellationError();
         add(prefix.prefixAt, valid.text);
         for (const edge of original.analysis.annotations) {
           const { from, to } = edge;
           if (edge.kind !== 'binding' || !edge.actual || !edge.require || !from || !sameRange(from, prefix.prefixAt) || !to) continue;
-          const jump = original.analysis.annotations.find(a => a.kind === 'jump' && a.at?.source === to.source && a.at.start === to.start && a.at.end >= to.end);
-          if (!jump?.at || jump.at.source !== source) throw new Error('Prefix reference has no complete source identifier');
-          const spelling = original.snapshot.slice(jump.at.start, jump.at.end);
+          const identifier = lexical.data.tokens.find(item => item.start === to.start && item.end >= to.end
+            && item.attributes.type === 'symbol' && !item.attributes['comment?']);
+          if (!identifier || to.source !== source) throw new Error('Prefix reference has no complete source identifier');
+          const range = { source, start: identifier.start, end: identifier.end };
+          const spelling = original.snapshot.slice(range.start, range.end);
           const oldPrefix = prefix.prefix;
-          if (oldPrefix === undefined || !spelling.startsWith(oldPrefix)) throw new Error('Prefix source spelling is ambiguous');
-          const combined = valid.name + spelling.slice(oldPrefix.length);
-          const checked = await original.worker.request<RenameResult>('rename', { ids: edge.id ? [edge.id] : [], name: combined }, token);
+          if (oldPrefix === undefined || to.end - to.start !== prefix.prefixAt.end - prefix.prefixAt.start) {
+            throw new Error('Prefix source mapping is ambiguous');
+          }
+          const checked = await original.worker.request<RenameResult>('rename',
+            { ids: edge.id ? [edge.id] : [], name: spelling, oldPrefix, prefix: valid.name }, token);
           if (checked.conflicts.length) throw new Error('The new prefix conflicts with an existing binding');
-          if (checked.text === combined && to.end - to.start === Array.from(oldPrefix).length) add(to, valid.name);
-          else add(jump.at, checked.text);
+          const width = Array.from(valid.text).length;
+          if (width > Array.from(checked.text).length) throw new Error('Prefix source mapping is ambiguous');
+          add(range, checked.text, { before: to.end - to.start, after: width });
         }
       } else {
+        const query = bindingAt(original.analysis.annotations, source, offset);
+        if (query.unresolvedImports) throw new Error('The imported binding identity is unresolved or ambiguous');
+        if (new Set(query.edges.map(edge => JSON.stringify(edge.phase))).size > 1) {
+          throw new Error('The source range denotes bindings at multiple phases');
+        }
         if (!query.ranges.length) throw new Error('No editable binding at this position');
+        const cursorRange = query.ranges.filter(range => atPosition(range, source, offset))
+          .sort((a, b) => a.end - a.start - (b.end - b.start))[0];
+        const cursorTarget = cursorRange && renameTarget(original.analysis.annotations, cursorRange);
+        if (!cursorTarget) throw new Error('No editable binding at this position');
         const alias = original.analysis.imports.find(({ renamed, localAt }) =>
           renamed && localAt && query.ranges.some(range => sameRange(range, localAt)));
         const keys = alias ? new Set<string>() : query.keys;
@@ -175,7 +208,7 @@ export function registerRename(workspace: Workspace): vscode.Disposable {
           const inspectDefinition = async (definition: SemanticSession) => {
             requireSemanticAnalysis(definition);
             baselines.set(definition.snapshot.uri.toString(), definition);
-            const targets = definition.analysis.annotations.filter(a => a.kind === 'definition' && a.at && bindingKeys(a).includes(key));
+            const targets = annotationsForBindings(definition.analysis.annotations, [key]).filter(a => a.kind === 'definition' && a.at);
             if (targets.length !== 1) throw new Error('The binding has no unique editable definition');
             const at = targets[0].at!;
             if (at.source !== workspace.sourcePath(definition.snapshot.uri) || !definition.snapshot.contains(at)) throw new Error('Definition source is unavailable');
@@ -194,9 +227,11 @@ export function registerRename(workspace: Workspace): vscode.Disposable {
         if (oldNames.size > 1) throw new Error('The source identifier denotes multiple definitions');
         const collectEdits = async (session: SemanticSession, ranges: SourceRange[]) => {
           const selected = new Set(ranges.map(rangeKey));
-          const aliases = keys.size ? session.analysis.imports.filter(item => item.renamed && item.localAt
-            && selected.has(rangeKey(item.localAt)) && oldNames.has(item.original)) : [];
-          const importedNames = new Set<string>();
+          const aliases = keys.size ? session.analysis.imports.filter(item => item.renamed
+            && (item.localAt && selected.has(rangeKey(item.localAt)) || item.originalAt && selected.has(rangeKey(item.originalAt)))
+            && oldNames.has(item.original)) : [];
+          const importedNames = new Set(connected(session.analysis.annotations,
+            aliases.flatMap(alias => alias.localAt ? [alias.localAt] : [])).ranges.map(rangeKey));
           for (const alias of aliases) {
             if (!alias.originalAt) throw new Error('Imported alias has no editable source name');
             add(alias.originalAt, validName.text);
@@ -204,7 +239,7 @@ export function registerRename(workspace: Workspace): vscode.Disposable {
             // its references keep their name, so their conflict callbacks do not apply.
             importedNames.add(rangeKey(alias.originalAt));
           }
-          const renamedRanges = new Set<string>();
+          const renamedRanges = new Map<string, string>();
           for (const range of ranges) {
             if (importedNames.has(rangeKey(range))) continue;
             if (!range.source || range.source.startsWith('racket-source:')) throw new Error('Binding has no editable source');
@@ -212,23 +247,33 @@ export function registerRename(workspace: Workspace): vscode.Disposable {
             if (!snapshot.contains(range)) throw new Error('Binding source range is no longer available');
             const spelling = snapshot.slice(range.start, range.end);
             const name = await decodeName(session, spelling);
-            if (aliases.some(alias => alias.name === name)) continue;
-            const prefixEdge = session.analysis.annotations.find(edge => edge.kind === 'binding' && edge.actual && edge.require && edge.to && edge.to.source === range.source
-              && edge.to.start > range.start && edge.to.end === range.end);
-            const target = prefixEdge?.to || range;
-            if (keys.size) {
-              const targetName = target === range ? name : await decodeName(session, snapshot.slice(target.start, target.end));
-              if (!oldNames.has(targetName)) continue;
-            }
+            const target = renameTarget(session.analysis.annotations, range);
+            const targetName = target === range ? name : await decodeName(session, snapshot.slice(target.start, target.end));
+            if (keys.size && !oldNames.has(targetName)) continue;
+            if (!name.endsWith(targetName)) throw new Error('Prefix source spelling is ambiguous');
+            const localPrefix = name.slice(0, name.length - targetName.length);
             add(target, validName.text);
-            renamedRanges.add(rangeKey(range));
+            for (const at of [range, target]) {
+              const previous = renamedRanges.get(rangeKey(at));
+              if (previous !== undefined && previous !== localPrefix) throw new Error('The source identifier has ambiguous import prefixes');
+              renamedRanges.set(rangeKey(at), localPrefix);
+            }
           }
-          const ids = session.analysis.annotations.filter(a => a.kind === 'binding' && a.actual
-            && (a.from && renamedRanges.has(rangeKey(a.from)) || a.to && renamedRanges.has(rangeKey(a.to))))
-            .flatMap(a => a.id ? [a.id] : []);
-          if (!ids.length) return;
-          const checked = await session.worker.request<RenameResult>('rename', { ids: [...new Set(ids)], name: newName }, token);
-          if (checked.conflicts.length) throw new Error('The new name conflicts with an existing binding');
+          const callbacks = new Map<string, Set<number>>();
+          for (const edge of session.analysis.annotations) {
+            if (edge.kind !== 'binding' || !edge.actual || !edge.id) continue;
+            for (const at of [edge.from, edge.to]) {
+              const prefix = at && renamedRanges.get(rangeKey(at));
+              if (prefix === undefined) continue;
+              const ids = callbacks.get(prefix) || new Set<number>();
+              ids.add(edge.id);
+              callbacks.set(prefix, ids);
+            }
+          }
+          for (const [prefix, ids] of callbacks) {
+            const checked = await session.worker.request<RenameResult>('rename', { ids: [...ids], name: validName.text, prefix }, token);
+            if (checked.conflicts.length) throw new Error('The new name conflicts with an existing binding');
+          }
         };
         const localRanges = [...new Map([...query.ranges, ...matchingRanges(original.analysis.annotations, keys)].map(range => [rangeKey(range), range])).values()];
         await collectEdits(original, localRanges);
@@ -242,6 +287,7 @@ export function registerRename(workspace: Workspace): vscode.Disposable {
             if (ranges.length) await collectEdits(session, ranges);
           });
         }
+        if (!edits.has(rangeKey(cursorTarget))) throw new Error('Rename cannot preserve the selected import or export alias');
       }
       workspace.assertCurrent(original);
       const result = new vscode.WorkspaceEdit();

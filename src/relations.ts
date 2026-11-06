@@ -3,12 +3,12 @@ import { basename } from 'node:path';
 import { Workspace, SemanticSession } from './workspace';
 import { Annotation, SourceRange } from './protocol';
 import { atPosition, isCancellation, isRacket, rangeKey } from './documents';
-import { bindingKeys, connected } from './bindings';
+import { annotationsAt, bindingAt, importEdgesForSelection, matchingRanges } from './bindings';
 
 interface Node { label: string; description?: string; location?: SourceRange; children?: Node[]; command?: vscode.Command }
 const categories: [string, string[]][] = [
   ['Bindings', ['binding']], ['Tail Positions', ['tail']], ['Definitions', ['definition', 'jump']],
-  ['Imports', ['require', 'prefix', 'language']], ['Documentation', ['documentation']],
+  ['Imports', ['require', 'prefix']], ['Documentation', ['documentation']],
   ['Unused', ['unusedBinding', 'unusedRequire']], ['Styles', ['style', 'textType', 'identifierKind']],
   ['Messages', ['hover']],
 ];
@@ -125,25 +125,25 @@ export class Relations implements vscode.TreeDataProvider<Node>, vscode.Disposab
   private focused(session: SemanticSession, position: number): Annotation[] {
     const source = this.workspace.sourcePath(session.snapshot.uri);
     const annotations = session.analysis.annotations;
-    const seeds = annotations.filter(a => !['application', 'outline', 'sourceForm'].includes(a.kind))
-      .flatMap(a => [a.at, a.from, a.to].filter((range): range is SourceRange => !!range && atPosition(range, source, position)))
-      .sort((a, b) => a.end - a.start - (b.end - b.start));
-    const initial = connected(annotations, seeds.slice(0, 1));
-    const initialRanges = new Set(initial.ranges.map(rangeKey));
-    const keys = new Set(annotations.filter(a => a.at && initialRanges.has(rangeKey(a.at))).flatMap(bindingKeys));
-    const related = annotations.flatMap(a => a.at && bindingKeys(a).some(key => keys.has(key)) ? [a.at] : []);
-    const group = connected(annotations, [...initial.ranges, ...related]);
-    const selectedRanges = new Set(group.ranges.map(rangeKey));
+    const atCursor = annotationsAt(annotations, source, position);
+    const group = bindingAt(annotations, source, position);
+    const ranges = [...group.ranges, ...matchingRanges(annotations, group.keys)];
+    const selectedRanges = new Set(ranges.map(rangeKey));
     const touches = (range: SourceRange | undefined) => !!range && (atPosition(range, source, position)
       || selectedRanges.has(rangeKey(range)));
-    const imports = annotations.flatMap(a => a.kind === 'binding' && a.actual && a.require && a.from && touches(a.to) ? [a.from] : []);
-    const application = annotations.flatMap(a => a.kind === 'application' && a.at && atPosition(a.at, source, position) ? [a.at] : [])
+    const importEdges = new Set(importEdgesForSelection(annotations, ranges, source, position));
+    const imports = [...importEdges].map(edge => edge.from!);
+    const application = atCursor.flatMap(a => a.kind === 'application' && a.at && atPosition(a.at, source, position) ? [a.at] : [])
       .sort((a, b) => a.end - a.start - (b.end - b.start))[0];
     const tailAt = (range: SourceRange | undefined) => !!range && (atPosition(range, source, position)
       || !!application && range.source === application.source && application.start <= range.start && range.start < application.end);
-    return annotations.filter(({ kind, at, from, to }) => kind === 'tail' ? tailAt(from) || tailAt(to)
-      : touches(at) || touches(from) || touches(to)
-        || !!at && imports.some(range => range.source === at.source && range.start <= at.start && at.end <= range.end));
+    return annotations.filter(annotation => {
+      if (importEdges.has(annotation)) return true;
+      const { kind, at, from, to, prefixAt } = annotation;
+      if (kind === 'tail') return tailAt(from) || tailAt(to);
+      return touches(at) || touches(from) || touches(to) || !!prefixAt && touches(prefixAt)
+        || !!at && imports.some(range => range.source === at.source && range.start <= at.start && at.end <= range.end);
+    });
   }
   private node(annotation: Annotation, session: SemanticSession): Node {
     const describe = (range: SourceRange) => {
@@ -182,7 +182,7 @@ export class Relations implements vscode.TreeDataProvider<Node>, vscode.Disposab
       || editor.document.version !== session.snapshot.version) return;
     const source = this.workspace.sourcePath(editor.document.uri), position = session.snapshot.offset(editor.selection.active);
     const ranges = new Map<string, vscode.Range[]>();
-    for (const a of session.analysis.annotations) {
+    for (const a of annotationsAt(session.analysis.annotations, source, position)) {
       if (a.kind !== 'textType' || !a.at || !atPosition(a.at, source, position) || !session.snapshot.contains(a.at)) continue;
       const key = `type:${a.type}`;
       const color = new vscode.ThemeColor(a.type === 'document-identifier' ? 'editor.hoverHighlightBackground' : a.type === 'unused-identifier' ? 'editor.wordHighlightStrongBackground' : 'editor.wordHighlightBackground');

@@ -3,7 +3,7 @@ import { Annotation, SourceRange } from './protocol';
 import { SemanticSession, Workspace, requireSemanticAnalysis } from './workspace';
 import { atPosition, rangeKey, assertNotCancelled, sameRange } from './documents';
 import { outlineSymbols, symbolKind } from './source';
-import { bindingAt, bindingKeys, matchingRanges } from './bindings';
+import { annotationsAt, annotationsForBindings, annotationsForRanges, bindingAt, bindingKeys, importEdgesForSelection, matchingRanges } from './bindings';
 
 async function resolveJump(workspace: Workspace, jump: Annotation, token?: vscode.CancellationToken): Promise<SourceRange[]> {
   if (!jump.path) return [];
@@ -12,8 +12,8 @@ async function resolveJump(workspace: Workspace, jump: Annotation, token?: vscod
   const uri = vscode.Uri.file(jump.path);
   return workspace.withSemantic(uri, token, target => {
     requireSemanticAnalysis(target);
-    return target.analysis.annotations.flatMap(a =>
-      a.kind === 'definition' && a.at && bindingKeys(a).some(key => keys.has(key)) ? [a.at] : []);
+    return annotationsForBindings(target.analysis.annotations, keys).flatMap(a =>
+      a.kind === 'definition' && a.at ? [a.at] : []);
   });
 }
 
@@ -74,11 +74,13 @@ export function registerNavigation(workspace: Workspace): vscode.Disposable[] {
         const source = workspace.sourcePath(document.uri), offset = session.snapshot.offset(position);
         const group = bindingAt(session.analysis.annotations, source, offset);
         const result = group.edges.map(edge => edge.from!);
-        for (const a of session.analysis.annotations) {
+        const candidates = new Set([...annotationsAt(session.analysis.annotations, source, offset),
+          ...annotationsForRanges(session.analysis.annotations, group.ranges)]);
+        for (const a of candidates) {
           if (a.kind === 'jump' && (atPosition(a.at, source, offset) || group.ranges.some(r => a.at && sameRange(r, a.at)))) {
             result.push(...await resolveJump(workspace, a, token));
           }
-          if (['require', 'language'].includes(a.kind) && atPosition(a.at, source, offset) && a.path) result.push({ source: a.path, start: 0, end: 0 });
+          if (a.kind === 'require' && atPosition(a.at, source, offset) && a.path) result.push({ source: a.path, start: 0, end: 0 });
         }
         workspace.assertCurrent(session);
         const targets = await locations(workspace, result);
@@ -107,7 +109,7 @@ export function registerNavigation(workspace: Workspace): vscode.Disposable[] {
         append(original, [...query.ranges, ...matchingRanges(original.analysis.annotations, query.keys)]);
         const crossFileKeys = new Set(query.keys);
         for (const key of query.keys) {
-          const definitions = original.analysis.annotations.filter(a => a.kind === 'definition' && a.at && bindingKeys(a).includes(key));
+          const definitions = annotationsForBindings(original.analysis.annotations, [key]).filter(a => a.kind === 'definition' && a.at);
           if (definitions.length !== 1) continue;
           const definition = definitions[0], at = definition.at!;
           if (at.source !== source || !original.snapshot.contains(at)) continue;
@@ -144,8 +146,7 @@ export function registerNavigation(workspace: Workspace): vscode.Disposable[] {
         const source = workspace.sourcePath(document.uri), offset = session.snapshot.offset(position);
         const group = bindingAt(session.analysis.annotations, source, offset);
         const ranges = [...group.ranges, ...matchingRanges(session.analysis.annotations, group.keys)];
-        for (const edge of session.analysis.annotations) if (edge.kind === 'binding' && edge.actual && edge.require
-          && (atPosition(edge.to, source, offset) || atPosition(edge.from, source, offset))) {
+        for (const edge of importEdgesForSelection(session.analysis.annotations, ranges, source, offset)) {
           ranges.push(edge.from!, edge.to!);
         }
         return [...new Map(ranges.filter(range => range.source === source && session.snapshot.contains(range)).map(range => [rangeKey(range), range])).values()]

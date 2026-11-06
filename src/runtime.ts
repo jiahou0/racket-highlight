@@ -169,9 +169,10 @@ export class Runtime implements vscode.Disposable {
   }
 
   private async evaluate(): Promise<void> {
-    const document = await this.fileDocument();
+    this.workspace.assertTrusted();
     const editor = vscode.window.activeTextEditor;
-    if (!editor || editor.document !== document) throw new vscode.CancellationError();
+    if (!editor || !isRacket(editor.document)) throw new Error('No Racket document selected');
+    const document = editor.document;
     const selection = editor.selection;
     const session = this.sessions.get(document.uri.toString());
     if (!session || session.terminal.exitStatus) throw new Error('Load the file in the REPL first');

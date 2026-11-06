@@ -4,9 +4,11 @@ import { Annotation, BackendEdit, CompletionCandidate } from './protocol';
 import { assertNotCancelled, atPosition, isCancellation, sameRange } from './documents';
 import { completionContext, localSignatureHelp } from './source';
 import { expressionRanges, surrounding } from './structural';
+import { annotationsAt, annotationsForRanges } from './bindings';
 
 function documentationAt(session: SemanticSession, source: string, offset: number): Annotation[] {
-  return session.analysis.annotations.filter(annotation => annotation.kind === 'documentation' && atPosition(annotation.at, source, offset));
+  return annotationsAt(session.analysis.annotations, source, offset)
+    .filter(annotation => annotation.kind === 'documentation' && atPosition(annotation.at, source, offset));
 }
 
 async function readDocumentation(session: SemanticSession, source: string, offset: number, token?: vscode.CancellationToken): Promise<{ annotation: Annotation; strings: string[] }[]> {
@@ -28,7 +30,7 @@ export function registerEditor(workspace: Workspace): vscode.Disposable[] {
       const session = await workspace.available(document.uri, token);
       if (!session?.analysis.complete || session.analysis.mode !== 'module') return;
       const source = workspace.sourcePath(document.uri), offset = session.snapshot.offset(position);
-      const entries = session.analysis.annotations.filter(a => atPosition(a.at, source, offset));
+      const entries = annotationsAt(session.analysis.annotations, source, offset).filter(a => atPosition(a.at, source, offset));
       const contents: vscode.MarkdownString[] = [];
       const messages = new Set<string>();
       for (const entry of entries) if (entry.kind === 'hover' && entry.text && !messages.has(entry.text)) {
@@ -72,7 +74,7 @@ export function registerEditor(workspace: Workspace): vscode.Disposable[] {
       const session = workspace.current(document.uri);
       const context = completionContext(lexical, wordStart);
       const source = workspace.sourcePath(document.uri);
-      const moduleForm = word && session?.analysis.complete && session.analysis.annotations.some(a =>
+      const moduleForm = word && session?.analysis.complete && annotationsAt(session.analysis.annotations, source, word.start).some(a =>
         a.kind === 'require' && a.at?.source === source && a.at.start <= word.start && word.end <= a.at.end);
       if (context?.modulePath || moduleForm) {
         // Escaped or multiline paths need more than segment replacement. Leave
@@ -146,7 +148,7 @@ export function registerEditor(workspace: Workspace): vscode.Disposable[] {
       if (!vscode.workspace.isTrusted) return;
       const lexical = await workspace.lexical(document, token);
       const offset = lexical.snapshot.offset(position);
-      const enclosing = surrounding(lexical, offset)[0];
+      const enclosing = surrounding(lexical, offset).find(range => range.openEnd <= offset && offset <= range.closeStart);
       if (!enclosing) return;
       const session = await workspace.available(document.uri, token);
       if (!session?.analysis.complete || session.analysis.mode !== 'module') return;
@@ -155,8 +157,8 @@ export function registerEditor(workspace: Workspace): vscode.Disposable[] {
         throw new vscode.CancellationError();
       }
       const source = workspace.sourcePath(document.uri);
-      const operators = session.analysis.annotations.filter(a => a.kind === 'application' && a.at?.source === source
-        && a.at.start === enclosing.start && a.at.end === enclosing.end).flatMap(a => a.operatorAt ? [a.operatorAt] : []);
+      const operators = annotationsForRanges(session.analysis.annotations, [{ source, start: enclosing.start, end: enclosing.end }])
+        .filter(a => a.kind === 'application').flatMap(a => a.operatorAt ? [a.operatorAt] : []);
       const operator = operators[0];
       if (!operator || operators.some(other => !sameRange(operator, other))
         || !lexical.data.tokens.some(t => t.start === operator.start && t.end === operator.end)) return;

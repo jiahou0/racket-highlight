@@ -1,8 +1,7 @@
 import * as vscode from 'vscode';
 import { Annotation, ReaderNode, SourceRange } from './protocol';
 import { LexicalSession } from './workspace';
-import { sameRange } from './documents';
-import { connected } from './bindings';
+import { annotationsForRanges, connected } from './bindings';
 
 // This is an editing hint for standard Racket, not a binding analysis. Walk
 // lexer tokens only up to the completion target so unfinished lists still work.
@@ -173,9 +172,14 @@ function sourceDefinitions(lexical: LexicalSession, annotations: Annotation[], s
     switch (kind) {
       case 'define':
         if (identifier(target)) { ids = [target]; signatures = lambdaSignatures(form.children[2]); }
-        else if (['list', 'dotted'].includes(target.kind) && identifier(target.children[0])) {
-          ids = [target.children[0]];
-          const params = parameters(target, 1); if (params) signatures = [params];
+        else {
+          let header = target;
+          while (['list', 'dotted'].includes(header.kind) && header.children[0]
+            && ['list', 'dotted'].includes(header.children[0].kind)) header = header.children[0];
+          if (['list', 'dotted'].includes(header.kind) && identifier(header.children[0])) {
+            ids = [header.children[0]];
+            const params = parameters(header, 1); if (params) signatures = [params];
+          }
         }
         if (signatures.length) symbolKind = vscode.SymbolKind.Function;
         break;
@@ -280,7 +284,9 @@ function activeParameter(parameters: Parameter[], args: ReaderNode[], offset: nu
   const last = positionalParameters.at(-1);
   for (let i = 0; i <= args.length; i++) {
     const arg = args[i];
-    const keyword = arg?.atomKind === 'keyword' ? String(arg.name) : undefined;
+    const candidate = positionalParameters[positional] || (last?.parameter.rest ? last : undefined);
+    if (!arg || offset < arg.start) return candidate?.index;
+    const keyword = arg.atomKind === 'keyword' ? String(arg.name) : undefined;
     if (keyword) {
       const value = args[i + 1];
       if (offset <= (value?.end ?? arg.end) || !value) {
@@ -289,8 +295,7 @@ function activeParameter(parameters: Parameter[], args: ReaderNode[], offset: nu
       }
       i++;
     } else {
-      const candidate = positionalParameters[positional] || (last?.parameter.rest ? last : undefined);
-      if (!arg || offset <= arg.end) return candidate?.index;
+      if (offset <= arg.end) return candidate?.index;
       positional++;
     }
   }
@@ -304,10 +309,10 @@ export function localSignatureHelp(lexical: LexicalSession, annotations: Annotat
     && node.children[0]?.start === operator.start && node.children[0]?.end === operator.end);
   if (!call) return;
   const group = connected(annotations, [operator]);
-  const targets = [...group.ranges, ...annotations.filter(a => a.kind === 'callBinding' && a.at && sameRange(a.at, operator))
+  const targets = [...group.ranges, ...annotationsForRanges(annotations, [operator]).filter(a => a.kind === 'callBinding')
     .flatMap(a => a.definitionAt ? [a.definitionAt] : [])];
-  const mutated = annotations.some(({ kind, style, at }) => kind === 'style' && style === 'drracket:check-syntax:set!d'
-    && at && targets.some(range => sameRange(range, at)));
+  const mutated = annotationsForRanges(annotations, targets).some(({ kind, style }) =>
+    kind === 'style' && style === 'drracket:check-syntax:set!d');
   if (mutated) return;
   const definitions = sourceDefinitions(lexical, annotations, source)
     .filter(d => d.signatures.length && targets.some(range => range.source === source && range.start === d.id.start && range.end === d.id.end));

@@ -340,7 +340,8 @@
      (define doc current-document)
      (define pos (hash-ref params 'position))
      (define t (send doc token-at pos))
-     (define usable? (and t (not (memq (hash-ref (token-attributes t) 'type) '(white-space comment sexp-comment)))
+     (define usable? (and (not (hash-ref params 'preceding #f))
+                          t (not (memq (hash-ref (token-attributes t) 'type) '(white-space comment sexp-comment)))
                           (not (hash-ref (token-attributes t) 'comment? #f))))
      (define end
        (if usable?
@@ -371,7 +372,8 @@
   (unless (equal? method "document")
     (update-overlays! current-env (hash-ref params 'documents #f)))
   (parameterize ([current-custodian document-custodian])
-    (call-in-environment current-env (lambda () (dispatch-in-environment method params)))))
+    (call-in-environment current-env (lambda () (dispatch-in-environment method params))
+                         #:record-dependencies? (not (equal? method "modules")))))
 
 (define (main)
   (serve dispatch #:dependencies

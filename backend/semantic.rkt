@@ -11,34 +11,70 @@
     (define callbacks (make-hash))
     (define documentation (make-hash))
     (define identifiers (make-hash))
+    (define import-bindings (make-hash))
+    (define phase-ranges #f)
+    (define definition-phases (make-hash))
     (define next-id 0)
     (define/private (fresh-id) (set! next-id (add1 next-id)) next-id)
     (define/private (add kind . fields)
-      (set! annotations (cons (apply hasheq 'kind kind fields) annotations)))
+      (set! annotations (cons (apply hasheq 'kind kind fields) annotations))
+      (when (member kind '("binding" "definition")) (set! phase-ranges #f)))
+    (define/private (index-phases)
+      (unless phase-ranges
+        (define ranges (make-hash))
+        (hash-clear! definition-phases)
+        (for ([a (in-list annotations)])
+          (cond
+            [(and (equal? (hash-ref a 'kind) "binding") (hash-ref a 'actual))
+             (define at (hash-ref a 'to))
+             (hash-update! ranges (hash-ref at 'source)
+                           (lambda (items) (cons (cons at (hash-ref a 'phase)) items)) '())
+             (unless (hash-ref a 'require)
+               (hash-update! definition-phases (hash-ref a 'from)
+                             (lambda (items) (cons (hash-ref a 'phase) items)) '()))]
+            [(equal? (hash-ref a 'kind) "definition")
+             (hash-update! definition-phases (hash-ref a 'at)
+                           (lambda (items) (cons (binding-phase (hash-ref a 'phaseSpace)) items)) '())]))
+        (set! phase-ranges
+              (for/hash ([(source entries) (in-hash ranges)])
+                (values source (list->vector (sort entries < #:key (lambda (entry) (hash-ref (car entry) 'start)))))))))
     (define/private (phases-at at)
+      (index-phases)
+      (define entries (hash-ref phase-ranges (hash-ref at 'source) #()))
+      (define start (hash-ref at 'start))
+      (define end (hash-ref at 'end))
+      (define first
+        (let loop ([low 0] [high (vector-length entries)])
+          (if (= low high) low
+              (let ([middle (quotient (+ low high) 2)])
+                (if (< (hash-ref (car (vector-ref entries middle)) 'start) start)
+                    (loop (add1 middle) high) (loop low middle))))))
       (remove-duplicates
        (append
-        (for/list ([edge (in-list annotations)]
-                   #:when (and (equal? (hash-ref edge 'kind) "binding") (hash-ref edge 'actual)
-                               (equal? (hash-ref (hash-ref edge 'to) 'source) (hash-ref at 'source))
-                               (<= (hash-ref at 'start) (hash-ref (hash-ref edge 'to) 'start))
-                               (<= (hash-ref (hash-ref edge 'to) 'end) (hash-ref at 'end))))
-          (hash-ref edge 'phase))
-        (for/list ([definition (in-list annotations)]
-                   #:when (and (equal? (hash-ref definition 'kind) "definition")
-                               (equal? (hash-ref definition 'at) at)))
-          (binding-phase (hash-ref definition 'phaseSpace))))))
+        ;; Import edges can end on subranges of a jump/style annotation. Keep
+        ;; containment semantics instead of indexing phases by exact range alone.
+        (for/list ([entry (in-vector entries first)]
+                   #:break (> (hash-ref (car entry) 'start) end)
+                   #:when (<= (hash-ref (car entry) 'end) end))
+          (cdr entry))
+        (hash-ref definition-phases at '()))))
     (define/public (all)
       (for/list ([annotation (in-list (reverse annotations))])
         (cond
           [(equal? (hash-ref annotation 'kind) "jump")
            (define at (hash-ref annotation 'at))
            (define levels (phases-at at))
+           ;; rename-in's source name has no local binding. Its scoped alias
+           ;; supplies the identity, but only at the verified import phase.
+           (define bindings
+             (append
+              (for*/list ([id (in-list (hash-ref identifiers at '()))] [phase (in-list levels)])
+                (identifier-binding id phase))
+              (for/list ([entry (in-list (hash-ref import-bindings at '()))])
+                (identifier-binding (car entry) (cdr entry)))))
            (define phases
              (remove-duplicates
-              (for*/list ([id (in-list (hash-ref identifiers at '()))] [phase (in-list levels)]
-                          [binding (in-value (identifier-binding id phase))]
-                          #:when (binding-matches-jump? binding annotation))
+              (for/list ([binding (in-list bindings)] #:when (binding-matches-jump? binding annotation))
                 (list-ref binding 4))))
            (hash-set annotation 'definitionPhases phases)]
           [else annotation])))
@@ -53,22 +89,21 @@
         (add "application" 'at (car application) 'operatorAt (cdr application))))
     (define/public (add-source-details details)
       (set! annotations (append (reverse details) annotations)))
-    (define/public (add-macro-kinds candidates)
-      (define macros (make-hasheq))
-      (for ([c (in-list candidates)] #:when (equal? (candidate-kind c) "macro"))
-        (hash-update! macros (syntax-e (candidate-identifier c)) (lambda (items) (cons c items)) '()))
+    (define/public (add-import-binding at id phase)
+      (hash-update! import-bindings at (lambda (entries) (cons (cons id phase) entries)) '()))
+    (define/public (add-macro-kinds bindings)
       (define seen (make-hash))
       (for ([a (in-list annotations)] #:when (equal? (hash-ref a 'kind) "style"))
         (define at (hash-ref a 'at))
-        (when (and (not (hash-has-key? seen at))
-                   (for*/or ([id (in-list (hash-ref identifiers at '()))]
-                             [c (in-list (hash-ref macros (syntax-e id) '()))])
-                     (define phase (candidate-phase c))
-                     (and (member phase (phases-at at))
-                          (identifier-binding (candidate-identifier c) phase)
-                          (free-identifier=? id (candidate-identifier c) phase))))
+        (unless (hash-has-key? seen at)
           (hash-set! seen at #t)
-          (add "identifierKind" 'at at 'type "macro"))))
+          (define phases (phases-at at))
+          (when (for*/or ([id (in-list (hash-ref identifiers at '()))]
+                         [phase (in-list phases)]
+                         [c (in-list (candidates-for-binding bindings id phase))])
+                  (and (equal? (candidate-kind c) "macro")
+                       (identifier-binding (candidate-identifier c) phase)))
+            (add "identifierKind" 'at at 'type "macro")))))
     (define/override (syncheck:find-source-object stx)
       (when (identifier? stx)
         (define at (syntax-location stx))
@@ -139,7 +174,7 @@
 
 ;; Import names come from declared modules. This does not instantiate the
 ;; user's module, or evaluate its run-time expressions for completion.
-(define (build-model original expanded path)
+(define (build-model original expanded path collector)
   (define candidates '())
   (define contexts '())
   (define imports '())
@@ -154,6 +189,8 @@
   (define source-identifiers (make-hash))
   (define source-applications (make-hash))
   (define parameter-locations (make-hash))
+  (define macro-locations (make-hash))
+  (define disappeared-bindings '())
   (define retained-origins '())
   (define (collect-source-identifiers value)
     (cond
@@ -171,6 +208,12 @@
       [(vector? value) (for ([v (in-vector value)]) (collect-source-identifiers v))]
       [(box? value) (collect-source-identifiers (unbox value))]))
   (collect-source-identifiers original)
+  (define (record-macro id phase)
+    (when (identifier? id)
+      (define at (syntax-location id))
+      (when (and at (eq? (hash-ref source-identifiers at #f) (syntax-e id)))
+        (hash-set! macro-locations (cons at phase) (syntax-e id))
+        (set! details (cons (hasheq 'kind "identifierKind" 'at at 'type "macro") details)))))
   (define (record-parameters formals phase)
     (cond
       [(identifier? formals)
@@ -186,6 +229,9 @@
     (list (cons #'define "define") (cons #'define-values "define-values")
           (cons #'define-syntax "define-syntax") (cons #'define-syntaxes "define-syntaxes")
           (cons #'define-syntax-rule "define-syntax-rule")
+          (cons #'let-syntax "let-syntax") (cons #'letrec-syntax "letrec-syntax")
+          (cons #'let-syntaxes "let-syntaxes") (cons #'letrec-syntaxes "letrec-syntaxes")
+          (cons #'letrec-syntaxes+values "letrec-syntaxes+values")
           (cons #'lambda "lambda") (cons #'λ "lambda")
           (cons #'case-lambda "case-lambda")
           (cons #'module "module") (cons #'module* "module*") (cons #'module+ "module+")
@@ -206,6 +252,37 @@
            (define parts (hash-ref source-applications at '()))
            (when (>= (length parts) 2)
              (cond
+               [(equal? (cdr entry) "define-syntax")
+                (define header (second parts))
+                (if (identifier? header) (record-macro header phase)
+                    (when (pair? (syntax-e header)) (record-macro (car (syntax-e header)) phase)))]
+               [(equal? (cdr entry) "define-syntaxes")
+                (for ([id (in-list (or (syntax->list (second parts)) '()))]) (record-macro id phase))]
+               [(equal? (cdr entry) "define-syntax-rule")
+                (define header (syntax-e (second parts)))
+                (when (pair? header) (record-macro (car header) phase))]
+               [(member (cdr entry) '("struct" "define-struct"))
+                (define header (second parts))
+                (define name (if (identifier? header) header
+                                 (and (pair? (syntax-e header)) (car (syntax-e header)))))
+                ;; Options can rename or omit the transformer binding. Record
+                ;; possible sites now, and color only expanded syntax binders.
+                (for ([id (in-list
+                           (cons name
+                                 (for/list ([option (in-list parts)] [value (in-list (cdr parts))]
+                                            #:when (member (syntax-e option) '(#:name #:extra-name)))
+                                   value)))]
+                      #:when (identifier? id))
+                  (define at (syntax-location id))
+                  (when (and at (eq? (hash-ref source-identifiers at #f) (syntax-e id)))
+                    (hash-set! macro-locations (cons at phase) (syntax-e id))))]
+               [(member (cdr entry) '("let-syntax" "letrec-syntax" "let-syntaxes" "letrec-syntaxes" "letrec-syntaxes+values"))
+                (for ([clause (in-list (or (syntax->list (second parts)) '()))])
+                  (define binding (syntax->list clause))
+                  (when (pair? binding)
+                    (define ids (car binding))
+                    (if (identifier? ids) (record-macro ids phase)
+                        (for ([id (in-list (or (syntax->list ids) '()))]) (record-macro id phase)))))]
                [(equal? (cdr entry) "lambda") (record-parameters (second parts) phase)]
                [(equal? (cdr entry) "case-lambda")
                 (for ([clause (in-list (cdr parts))])
@@ -300,7 +377,8 @@
                          (equal? (resolve-module-path-index (third binding) (string->path path)) resolved)
                          (equal? (fourth binding) original)
                          (equal? (list-ref binding 6) phase-space))
-                (set! candidates (cons (candidate scoped p actual-space kind (format "~s" module-path)) candidates)))
+                (set! candidates (cons (candidate scoped p actual-space kind (format "~s" module-path)) candidates))
+                (when original-at (send collector add-import-binding original-at scoped p)))
               (set! imports (cons (hasheq 'name (symbol->string name) 'original (symbol->string original)
                                          'renamed (and renamed #t) 'prefix prefix 'phase (json-value p)
                                          'space (json-value actual-space) 'module (format "~s" module-path)
@@ -352,17 +430,38 @@
       (define ids (first parts))
       ;; Internal definitions retain their origin on the binding clause.
       (source-origin (syntax-property clause 'origin) phase)
+      (source-origin (syntax-property clause 'disappeared-use) phase)
+      (collect-disappeared-bindings (syntax-property clause 'disappeared-binding) phase)
       (walk ids phase (value-binding-kind ids (second parts) phase))))
+  (define (collect-disappeared-bindings value phase)
+    (cond
+      [(identifier? value)
+       (source-origin (syntax-property value 'origin) phase)
+       (set! disappeared-bindings (cons (cons value phase) disappeared-bindings))]
+      [(pair? value)
+       (collect-disappeared-bindings (car value) phase)
+       (collect-disappeared-bindings (cdr value) phase)]))
   (define (walk value phase [kind "identifier"])
     (cond
       [(syntax? value)
        (source-origin (syntax-property value 'origin) phase)
+       (source-origin (syntax-property value 'disappeared-use) phase)
+       (collect-disappeared-bindings (syntax-property value 'disappeared-binding) phase)
        (when (pair? (syntax-e value)) (source-origin (car (syntax-e value)) phase))
        (define loc (syntax-location value))
        (when (and loc (equal? (hash-ref loc 'source) path))
-         (set! contexts (cons (context value phase (hash-ref loc 'start) (hash-ref loc 'end)) contexts)))
+         ;; Module wrappers lack the body's inside-edge scope. Keep their full
+         ;; source coverage, but resolve names in the actual module body.
+         (define-values (scope scope-phase)
+           (kernel-syntax-case/phase value phase
+             [(module name lang body ...) (values (car (syntax->list #'(body ...))) 0)]
+             [(module* name lang body ...)
+              (values (car (syntax->list #'(body ...))) (if (syntax-e #'lang) 0 phase))]
+             [_ (values value phase)]))
+         (set! contexts (cons (context scope scope-phase (hash-ref loc 'start) (hash-ref loc 'end)) contexts)))
        (cond
          [(identifier? value)
+          (when (equal? kind "macro") (record-macro value phase))
           (when (or (syntax-original? value) (syntax-property value 'original-for-check-syntax))
             (set! candidates (cons (candidate value phase #f kind "") candidates)))]
          [else
@@ -426,6 +525,17 @@
       [(vector? value) (for ([v (in-vector value)]) (walk v phase kind))]
       [(box? value) (walk (unbox value) phase kind)]))
   (walk expanded 0)
+  ;; Fully expanded local transformer definitions disappear. Recover only
+  ;; binders whose source declaration was confirmed as a standard syntax form;
+  ;; arbitrary macros also use disappeared-binding for non-macro identifiers.
+  (for ([entry (in-list disappeared-bindings)])
+    (define id (car entry))
+    (define phase (cdr entry))
+    (define at (syntax-location id))
+    (when (and at (eq? (hash-ref macro-locations (cons at phase) #f) (syntax-e id))
+               (identifier-binding id phase))
+      (record-macro id phase)
+      (set! candidates (cons (candidate id phase #f "macro" "") candidates))))
   ;; Index actual bindings, not printed names: import aliases can have different
   ;; spellings while denoting the same binding. Each phase needs its own table.
   (define bindings (make-hash))
@@ -507,11 +617,11 @@
             (define-values (accept done) (make-traversal (environment-namespace current-env) (path-only (string->path path))))
             (accept expanded)
             (done))
-          (set! current-model (build-model original expanded path))
+          (set! current-model (build-model original expanded path current-collector))
           (send current-collector add-literal-kinds (model-literals current-model))
           (send current-collector add-applications (model-applications current-model))
           (send current-collector add-source-details (model-details current-model))
-          (send current-collector add-macro-kinds (model-candidates current-model))])
+          (send current-collector add-macro-kinds (model-bindings current-model))])
        (set! complete? #t))))
   (hasheq 'complete complete? 'annotations (call-in-environment current-env (lambda () (send current-collector all))) 'errors errors
           'mode current-mode
@@ -527,7 +637,8 @@
                   (for/list ([c (in-list (model-candidates current-model))]
                              #:when (identifier-binding (candidate-identifier c) (candidate-phase c)))
                     (define name (syntax-e (candidate-identifier c)))
-                    (hasheq 'name (symbol->string name) 'insert (format "~s" name))))))
+                    (hasheq 'name (symbol->string name) 'insert (format "~s" name)))
+                  #:key (lambda (item) (hash-ref item 'name)))))
               '())
           'completionIssues (if current-model (model-issues current-model) '())
           'dependencies (hash-keys (environment-dependencies current-env))))
@@ -604,7 +715,12 @@
          (define value (read input))
          (unless (and (symbol? value) (eof-object? (read input)))
            (error 'rename "Expected a Racket identifier"))
-         value))
+         (define spelling (symbol->string value))
+         (define old-prefix (hash-ref params 'oldPrefix #f))
+         (when (and old-prefix (not (string-prefix? spelling old-prefix)))
+           (error 'rename "Identifier does not have the selected prefix"))
+         (define suffix (if old-prefix (substring spelling (string-length old-prefix)) spelling))
+         (string->symbol (string-append (hash-ref params 'prefix "") suffix))))
      (call-in-environment current-env
        (lambda ()
          (hasheq 'name (symbol->string name) 'text (format "~s" name)

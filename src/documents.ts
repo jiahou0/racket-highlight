@@ -50,6 +50,16 @@ export class Snapshot {
   contains(range: SourceRange): boolean { return range.start >= 0 && range.end >= range.start && range.end <= this.length; }
 }
 
+const documentSnapshots = new WeakMap<vscode.TextDocument, Snapshot>();
+
+export function documentSnapshot(document: vscode.TextDocument): Snapshot {
+  const cached = documentSnapshots.get(document);
+  if (cached?.version === document.version) return cached;
+  const snapshot = new Snapshot(document.uri, document.getText(), document.version);
+  documentSnapshots.set(document, snapshot);
+  return snapshot;
+}
+
 export const isRacket = (document: vscode.TextDocument): boolean => document.languageId === 'racket';
 export const atPosition = (range: SourceRange | false | undefined, source: string, position: number): boolean =>
   !!range && range.source === source && range.start <= position && (position < range.end || range.start === range.end && position === range.start);
@@ -59,4 +69,18 @@ export const sameRange = (a: SourceRange, b: SourceRange): boolean =>
 export const isCancellation = (error: unknown): boolean => error instanceof vscode.CancellationError;
 export function assertNotCancelled(token?: vscode.CancellationToken): void {
   if (token?.isCancellationRequested) throw new vscode.CancellationError();
+}
+
+export function awaitWithCancellation<T>(promise: Promise<T>, token?: vscode.CancellationToken): Promise<T> {
+  if (!token) return promise;
+  return new Promise<T>((resolve, reject) => {
+    let subscription: vscode.Disposable | undefined;
+    const cancel = () => { subscription?.dispose(); reject(new vscode.CancellationError()); };
+    subscription = token.onCancellationRequested(cancel);
+    // Keep observing the shared request after this caller cancels. Its owner
+    // decides whether other callers or an open document still need the worker.
+    promise.then(value => { subscription?.dispose(); resolve(value); },
+      error => { subscription?.dispose(); reject(error); });
+    if (token.isCancellationRequested) cancel();
+  });
 }
