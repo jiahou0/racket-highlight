@@ -1,0 +1,12 @@
+**
+!package.json
+!README.md
+!CHANGELOG.md
+!docs/ARCHITECTURE.md
+!docs/CHECK_SYNTAX.md
+!language-configuration.json
+!syntaxes/**
+!snippets/**
+!media/**
+!dist/*.js
+!dist/backend/*.rkt

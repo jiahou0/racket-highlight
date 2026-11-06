@@ -1,0 +1,169 @@
+{
+  "name": "racket-highlight",
+  "displayName": "Racket Workbench",
+  "description": "Racket editing and module interactions powered by Racket’s reader, expander, and Check Syntax.",
+  "version": "0.2.36",
+  "publisher": "racket-workbench-local",
+  "private": true,
+  "license": "UNLICENSED",
+  "engines": { "vscode": "^1.95.0" },
+  "categories": ["Programming Languages"],
+  "extensionKind": ["workspace"],
+  "main": "./dist/extension.js",
+  "activationEvents": ["onLanguage:racket", "onView:racket.relations"],
+  "capabilities": { "untrustedWorkspaces": { "supported": "limited" }, "virtualWorkspaces": false },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "clean": "node scripts/build.mjs --clean",
+    "package": "node scripts/build.mjs --package"
+  },
+  "contributes": {
+    "colors": [{
+      "id": "racketWorkbench.parameterForeground",
+      "description": "Racket parameter",
+      "defaults": { "light": "#9A4B00", "dark": "#E5C07B", "highContrast": "#FFD700", "highContrastLight": "#7A3E00" }
+    }, {
+      "id": "racketWorkbench.functionForeground",
+      "description": "Racket function",
+      "defaults": { "light": "#006B63", "dark": "#56D4C0", "highContrast": "#00FFFF", "highContrastLight": "#005A50" }
+    }],
+    "languages": [{ "id": "racket", "aliases": ["Racket", "racket"], "extensions": [".rkt", ".rktd", ".rktl", ".ss", ".scm", ".scrbl", ".rhm"], "firstLine": "^#lang\\s", "configuration": "./language-configuration.json" }],
+    "grammars": [{ "language": "racket", "scopeName": "source.racket", "path": "./syntaxes/racket.tmLanguage.json" }],
+    "snippets": [{ "language": "racket", "path": "./snippets/racket.json" }],
+    "commands": [
+      { "command": "racket.loadFileInRepl", "title": "Racket: Load File in REPL", "icon": { "light": "media/repl-light.svg", "dark": "media/repl-dark.svg" }, "enablement": "isWorkspaceTrusted" },
+      { "command": "racket.run", "title": "Racket: Run File in Terminal", "icon": { "light": "media/run-light.svg", "dark": "media/run-dark.svg" }, "enablement": "isWorkspaceTrusted" },
+      { "command": "racket.organizeDefinitions", "title": "Racket: Organize Duplicate Definitions", "icon": { "light": "media/organize-light.svg", "dark": "media/organize-dark.svg" }, "enablement": "isWorkspaceTrusted" },
+      { "command": "racket.evaluate", "title": "Racket: Evaluate Selection or Expression" },
+      { "command": "racket.interrupt", "title": "Racket: Interrupt REPL" },
+      { "command": "racket.stop", "title": "Racket: Stop REPL" },
+      { "command": "racket.restart", "title": "Racket: Restart REPL" },
+      { "command": "racket.reanalyze", "title": "Racket: Reanalyze Workspace" },
+      { "command": "racket.checkCurrentFile", "title": "Racket: Check Current File", "enablement": "isWorkspaceTrusted && racket.active" },
+      { "command": "racket.cancelCheck", "title": "Racket: Cancel Current Check", "enablement": "isWorkspaceTrusted && racket.active && racket.checking" },
+      { "command": "racket.relations", "title": "Racket: Show Syntax Relations" },
+      { "command": "racket.relations.followCursor", "title": "Racket: Follow Cursor", "icon": "$(target)" },
+      { "command": "racket.relations.showAll", "title": "Racket: Show All Relations", "icon": "$(list-tree)" },
+      { "command": "racket.documentation", "title": "Racket: Open Documentation" },
+      { "command": "racket.selectExpression", "title": "Racket: Select Expression", "enablement": "isWorkspaceTrusted && racket.active" },
+      { "command": "racket.forwardExpression", "title": "Racket: Next Expression" },
+      { "command": "racket.backwardExpression", "title": "Racket: Previous Expression" },
+      { "command": "racket.upExpression", "title": "Racket: Enclosing Expression" },
+      { "command": "racket.downExpression", "title": "Racket: Enter Expression" },
+      { "command": "racket.wrapRound", "title": "Racket: Wrap with Parentheses", "enablement": "isWorkspaceTrusted && racket.active" },
+      { "command": "racket.wrapSquare", "title": "Racket: Wrap with Brackets", "enablement": "isWorkspaceTrusted && racket.active" },
+      { "command": "racket.unwrap", "title": "Racket: Unwrap Expression", "enablement": "isWorkspaceTrusted && racket.active" },
+      { "command": "racket.slurpForward", "title": "Racket: Slurp Forward", "enablement": "isWorkspaceTrusted" },
+      { "command": "racket.slurpBackward", "title": "Racket: Slurp Backward", "enablement": "isWorkspaceTrusted" },
+      { "command": "racket.barfForward", "title": "Racket: Barf Forward", "enablement": "isWorkspaceTrusted" },
+      { "command": "racket.barfBackward", "title": "Racket: Barf Backward", "enablement": "isWorkspaceTrusted" },
+      { "command": "racket.swapForward", "title": "Racket: Swap with Next Expression", "enablement": "isWorkspaceTrusted" },
+      { "command": "racket.swapBackward", "title": "Racket: Swap with Previous Expression", "enablement": "isWorkspaceTrusted" },
+      { "command": "racket.raiseExpression", "title": "Racket: Raise Expression", "enablement": "isWorkspaceTrusted" },
+      { "command": "racket.deleteExpression", "title": "Racket: Delete Expression", "enablement": "isWorkspaceTrusted" },
+      { "command": "racket.changeBrackets", "title": "Racket: Change List Brackets", "enablement": "isWorkspaceTrusted && racket.active" },
+      { "command": "racket.toggleExpressionComment", "title": "Racket: Toggle Expression Comment", "enablement": "isWorkspaceTrusted && racket.active" },
+      { "command": "racket.inspect", "title": "Racket: Inspect Check Syntax Annotations" }
+    ],
+    "keybindings": [
+      { "command": "racket.run", "key": "ctrl+alt+r", "mac": "cmd+alt+r", "when": "editorLangId == racket && editorTextFocus" },
+      { "command": "racket.checkCurrentFile", "key": "ctrl+alt+k", "mac": "cmd+alt+k", "when": "editorLangId == racket && editorTextFocus && isWorkspaceTrusted" },
+      { "command": "racket.cancelCheck", "key": "ctrl+alt+shift+k", "mac": "cmd+alt+shift+k", "when": "editorLangId == racket && editorTextFocus && isWorkspaceTrusted && racket.checking" },
+      { "command": "racket.toggleExpressionComment", "key": "ctrl+alt+;", "mac": "cmd+alt+;", "when": "editorLangId == racket && editorTextFocus && isWorkspaceTrusted" },
+      { "command": "racket.evaluate", "key": "alt+enter", "when": "editorLangId == racket && editorTextFocus" },
+      { "command": "racket.backwardExpression", "key": "alt+left", "when": "editorLangId == racket && editorTextFocus && isWorkspaceTrusted" },
+      { "command": "racket.forwardExpression", "key": "alt+right", "when": "editorLangId == racket && editorTextFocus && isWorkspaceTrusted" },
+      { "command": "racket.upExpression", "key": "alt+up", "when": "editorLangId == racket && editorTextFocus && isWorkspaceTrusted" },
+      { "command": "racket.downExpression", "key": "alt+down", "when": "editorLangId == racket && editorTextFocus && isWorkspaceTrusted" },
+      { "command": "racket.selectExpression", "key": "alt+s", "when": "editorLangId == racket && editorTextFocus && isWorkspaceTrusted" },
+      { "command": "racket.swapBackward", "key": "alt+shift+left", "when": "editorLangId == racket && editorTextFocus && isWorkspaceTrusted && !editorReadonly" },
+      { "command": "racket.swapForward", "key": "alt+shift+right", "when": "editorLangId == racket && editorTextFocus && isWorkspaceTrusted && !editorReadonly" },
+      { "command": "racket.raiseExpression", "key": "alt+shift+up", "when": "editorLangId == racket && editorTextFocus && isWorkspaceTrusted && !editorReadonly" },
+      { "command": "racket.slurpBackward", "key": "ctrl+alt+left", "mac": "cmd+alt+left", "when": "editorLangId == racket && editorTextFocus && isWorkspaceTrusted && !editorReadonly" },
+      { "command": "racket.slurpForward", "key": "ctrl+alt+right", "mac": "cmd+alt+right", "when": "editorLangId == racket && editorTextFocus && isWorkspaceTrusted && !editorReadonly" },
+      { "command": "racket.barfBackward", "key": "ctrl+alt+shift+left", "mac": "cmd+alt+shift+left", "when": "editorLangId == racket && editorTextFocus && isWorkspaceTrusted && !editorReadonly" },
+      { "command": "racket.barfForward", "key": "ctrl+alt+shift+right", "mac": "cmd+alt+shift+right", "when": "editorLangId == racket && editorTextFocus && isWorkspaceTrusted && !editorReadonly" },
+      { "command": "racket.wrapRound", "key": "alt+p", "when": "editorLangId == racket && editorTextFocus && isWorkspaceTrusted && !editorReadonly" },
+      { "command": "racket.wrapSquare", "key": "alt+b", "when": "editorLangId == racket && editorTextFocus && isWorkspaceTrusted && !editorReadonly" },
+      { "command": "racket.unwrap", "key": "alt+u", "when": "editorLangId == racket && editorTextFocus && isWorkspaceTrusted && !editorReadonly" },
+      { "command": "racket.changeBrackets", "key": "alt+c", "when": "editorLangId == racket && editorTextFocus && isWorkspaceTrusted && !editorReadonly" },
+      { "command": "racket.toggleExpressionComment", "key": "alt+;", "when": "editorLangId == racket && editorTextFocus && isWorkspaceTrusted && !editorReadonly" },
+      { "command": "racket.deleteExpression", "key": "alt+backspace", "when": "editorLangId == racket && editorTextFocus && isWorkspaceTrusted && !editorReadonly" }
+    ],
+    "menus": {
+      "view/title": [
+        { "command": "racket.relations.showAll", "when": "view == racket.relations && racket.relations.followCursor", "group": "navigation" },
+        { "command": "racket.relations.followCursor", "when": "view == racket.relations && !racket.relations.followCursor", "group": "navigation" }
+      ],
+      "editor/title": [
+        { "command": "racket.loadFileInRepl", "when": "resourceLangId == racket", "group": "navigation@-10000" },
+        { "command": "racket.run", "when": "resourceLangId == racket", "group": "navigation@-9999" },
+        { "command": "racket.organizeDefinitions", "when": "resourceLangId == racket", "group": "navigation@-9998" }
+      ],
+      "editor/context": [
+        { "command": "racket.evaluate", "when": "editorLangId == racket", "group": "racket@1" },
+        { "command": "racket.relations", "when": "editorLangId == racket", "group": "racket@2" },
+        { "command": "racket.documentation", "when": "editorLangId == racket", "group": "racket@3" },
+        { "submenu": "racket.structure", "when": "editorLangId == racket", "group": "racket@4" }
+      ],
+      "racket.structure": [
+        { "command": "racket.selectExpression", "group": "0@1" },
+        { "command": "racket.wrapRound", "group": "0@2" },
+        { "command": "racket.wrapSquare", "group": "0@3" },
+        { "command": "racket.unwrap", "group": "0@4" },
+        { "command": "racket.slurpForward", "group": "1@1" },
+        { "command": "racket.slurpBackward", "group": "1@2" },
+        { "command": "racket.barfForward", "group": "1@3" },
+        { "command": "racket.barfBackward", "group": "1@4" },
+        { "command": "racket.swapForward", "group": "2@1" },
+        { "command": "racket.swapBackward", "group": "2@2" },
+        { "command": "racket.raiseExpression", "group": "3@1" },
+        { "command": "racket.deleteExpression", "group": "3@2" },
+        { "command": "racket.changeBrackets", "group": "4@1" },
+        { "command": "racket.toggleExpressionComment", "group": "4@2" }
+      ]
+    },
+    "submenus": [{ "id": "racket.structure", "label": "Racket Structure" }],
+    "views": { "explorer": [{ "id": "racket.relations", "name": "Racket Relations", "when": "racket.active" }] },
+    "configuration": {
+      "title": "Racket Workbench",
+      "properties": {
+        "racketWorkbench.executable": { "type": "string", "default": "racket", "scope": "machine-overridable", "title": "Racket Executable" },
+        "racketWorkbench.arguments": { "type": "array", "items": { "type": "string" }, "default": [], "title": "Program Arguments" },
+        "racketWorkbench.workingDirectory": { "type": "string", "default": "", "title": "Working Directory" }
+      }
+    },
+    "configurationDefaults": { "[racket]": { "editor.semanticHighlighting.enabled": true, "editor.formatOnType": true, "editor.tabSize": 2, "editor.insertSpaces": true } },
+    "semanticTokenTypes": [
+      { "id": "racketConstant", "superType": "variable", "description": "Lexer constant" },
+      { "id": "racketDatum", "superType": "variable", "description": "Literal symbol" },
+      { "id": "racketLexical", "superType": "variable", "description": "Lexical binding" },
+      { "id": "racketImported", "superType": "variable", "description": "Imported binding" },
+      { "id": "racketFree", "superType": "variable", "description": "Free identifier" },
+      { "id": "racketMutated", "superType": "variable", "description": "Mutated binding" },
+      { "id": "racketMyObligation", "description": "Contract obligation" },
+      { "id": "racketTheirObligation", "description": "Contract assumption" },
+      { "id": "racketBothObligations", "description": "Both contract obligations" },
+      { "id": "racketUnknownObligation", "description": "Unknown contract obligation" }
+    ],
+    "semanticTokenScopes": [{ "language": "racket", "scopes": {
+      "racketLexical": ["variable.other.racket"], "racketImported": ["support.variable.racket"],
+      "racketFree": ["invalid.illegal.racket"], "racketMutated": ["variable.other.readwrite.racket"],
+      "racketDatum": ["constant.other.symbol.racket", "constant.language.symbol.racket"],
+      "racketConstant": ["constant.other.racket"],
+      "parameter": ["variable.parameter.racket"],
+      "parameter.declaration": ["variable.parameter.racket"],
+      "function": ["entity.name.function.racket"],
+      "function.declaration": ["entity.name.function.racket"],
+      "racketMyObligation": ["entity.name.type.contract.obligation.racket"],
+      "racketTheirObligation": ["support.type.contract.assumption.racket"],
+      "racketBothObligations": ["keyword.other.contract.both.racket"],
+      "racketUnknownObligation": ["variable.other.contract.unknown.racket"],
+      "racketLexical.declaration": ["variable.other.definition.racket", "entity.name.variable.racket"],
+      "racketMutated.declaration": ["variable.other.readwrite.definition.racket", "entity.name.variable.racket"],
+      "macro.declaration": ["entity.name.function.macro.racket", "keyword.control.racket"],
+      "macro": ["keyword.control.racket"]
+    }}]
+  },
+  "devDependencies": { "@types/node": "^22.0.0", "@types/vscode": "^1.95.0", "@vscode/vsce": "^3.0.0", "typescript": "^5.7.0" }
+}

@@ -1,0 +1,34 @@
+{
+  "define function": {
+    "prefix": "rkt-fun",
+    "body": ["(define (${1:name} ${2:args})", "  $0)"]
+  },
+  "define value": {
+    "prefix": "rkt-def",
+    "body": "(define ${1:name} $0)"
+  },
+  "lambda": {
+    "prefix": "rkt-lambda",
+    "body": ["(lambda (${1:args})", "  $0)"]
+  },
+  "let": {
+    "prefix": "rkt-let",
+    "body": ["(let ([${1:name} ${2:value}])", "  $0)"]
+  },
+  "cond": {
+    "prefix": "rkt-cond",
+    "body": ["(cond", "  [${1:condition} ${2:result}]", "  [else $0])"]
+  },
+  "for/list": {
+    "prefix": "rkt-for-list",
+    "body": ["(for/list ([${1:item} ${2:sequence}])", "  $0)"]
+  },
+  "match": {
+    "prefix": "rkt-match",
+    "body": ["(match ${1:value}", "  [${2:pattern} $0])"]
+  },
+  "module+": {
+    "prefix": "rkt-module+",
+    "body": ["(module+ ${1:main}", "  $0)"]
+  }
+}

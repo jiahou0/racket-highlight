@@ -1,0 +1,19 @@
+{
+  "scopeName": "source.racket",
+  "patterns": [
+    { "include": "#block-comment" },
+    { "name": "comment.block.expression.marker.racket", "match": "#;" },
+    { "name": "comment.line.semicolon.racket", "begin": ";", "end": "$" },
+    { "name": "meta.language.racket", "match": "^#lang\\s+\\S+" },
+    { "name": "string.unquoted.here.racket", "begin": "#<<([^\\r\\n]+)$", "end": "^\\1$" },
+    { "name": "string.quoted.double.racket", "begin": "(?:#(?:px|rx)?#?)?\"", "end": "\"", "patterns": [{ "name": "constant.character.escape.racket", "match": "\\\\." }] },
+    { "name": "constant.character.racket", "match": "#\\\\(?:[a-zA-Z][a-zA-Z0-9]*|.)" },
+    { "name": "variable.other.racket", "begin": "\\|", "end": "\\|", "patterns": [{ "match": "\\\\." }] },
+    { "name": "constant.language.racket", "match": "(?<![^\\s()\\[\\]{}])#(?:true|false|t|f)(?=$|[\\s()\\[\\]{}])" },
+    { "name": "constant.numeric.racket", "match": "(?<![^\\s()\\[\\]{}])[+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:/[0-9]+|[eE][+-]?[0-9]+)?(?=$|[\\s()\\[\\]{}])" },
+    { "name": "constant.other.keyword.racket", "match": "#:(?:\\\\.|[^\\s()\\[\\]{}\"'`,;|\\\\])+" },
+    { "name": "punctuation.section.racket", "match": "[()\\[\\]{}]" },
+    { "match": "(?:\\\\.|[^\\s()\\[\\]{}\"'`,;|\\\\])+" }
+  ],
+  "repository": { "block-comment": { "name": "comment.block.racket", "begin": "#\\|", "end": "\\|#", "patterns": [{ "include": "#block-comment" }] } }
+}
